@@ -77,6 +77,7 @@ impl IngressDecoder for ResponsesDecoder {
                     content: MessageContent::Text(inst.to_string()),
                     tool_calls: None,
                     tool_call_id: None,
+                    extra: HashMap::new(),
                 });
             }
 
@@ -91,6 +92,7 @@ impl IngressDecoder for ResponsesDecoder {
                     content: MessageContent::Text(text.clone()),
                     tool_calls: None,
                     tool_call_id: None,
+                    extra: HashMap::new(),
                 });
             }
             Value::Array(items) => {
@@ -176,6 +178,7 @@ fn decode_input_item(item: &Value) -> Result<Option<InternalMessage>> {
                 content: MessageContent::Text(output_text),
                 tool_calls: None,
                 tool_call_id: Some(call_id),
+                extra: HashMap::new(),
             }))
         }
 
@@ -204,6 +207,7 @@ fn decode_input_item(item: &Value) -> Result<Option<InternalMessage>> {
                 content: MessageContent::Text(String::new()),
                 tool_calls: Some(vec![ToolCall { id: call_id, name, arguments }]),
                 tool_call_id: None,
+                extra: HashMap::new(),
             }))
         }
 
@@ -257,7 +261,13 @@ fn decode_message_item(item: &Value) -> Result<Option<InternalMessage>> {
         None => return Ok(None),
     };
 
-    Ok(Some(InternalMessage { role, content, tool_calls: None, tool_call_id: None }))
+    Ok(Some(InternalMessage {
+        role,
+        content,
+        tool_calls: None,
+        tool_call_id: None,
+        extra: HashMap::new(),
+    }))
 }
 
 fn parse_tools(raw_tools: Option<&Value>) -> Result<Option<Vec<ToolDef>>> {
