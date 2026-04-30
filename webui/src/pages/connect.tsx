@@ -353,6 +353,7 @@ function cliPreviewTemplate(params: {
 }
 
 # ~/.codex/config.toml
+model_catalog_json = "~/.codex/nyro-models.json"
 model_provider = "nyro"
 model = "${codexModel}"
 model_reasoning_effort = "high"
@@ -363,7 +364,10 @@ disable_response_storage = true
 name = "Nyro Gateway"
 base_url = "${codexBaseUrl}"
 wire_api = "responses"
-requires_openai_auth = true`;
+requires_openai_auth = true
+
+# nyro-models.json is auto-generated during sync.
+# Contains ALL Nyro routes as selectable models in the dropdown.`;
   }
   if (tool.id === "gemini-cli") {
     return `# ~/.gemini/.env
@@ -688,6 +692,14 @@ export default function ConnectPage() {
               reasoning: selectedCliCapabilities.reasoning,
             }
           : undefined,
+        routes: cliRoutes.map((r) => ({
+          virtual_model: r.virtual_model,
+          name: r.name,
+          is_enabled: r.is_enabled,
+          target_provider: r.target_provider,
+          target_model: r.target_model,
+          route_type: r.route_type,
+        })),
       }),
     onSuccess: () => {
       setCliTransientFeedback({

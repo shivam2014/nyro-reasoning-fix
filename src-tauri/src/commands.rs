@@ -684,6 +684,16 @@ pub struct CliModelCapabilities {
     pub reasoning: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteSyncInfo {
+    pub virtual_model: String,
+    pub name: String,
+    pub is_enabled: bool,
+    pub target_provider: String,
+    pub target_model: String,
+    pub route_type: String,
+}
+
 #[tauri::command]
 pub async fn sync_cli_config(
     app: tauri::AppHandle,
@@ -692,6 +702,7 @@ pub async fn sync_cli_config(
     api_key: String,
     model: String,
     _capabilities: Option<CliModelCapabilities>,
+    routes: Vec<RouteSyncInfo>,
 ) -> Result<Vec<String>, String> {
     let home_dir = resolve_home_dir().ok_or_else(|| "failed to resolve home directory".to_string())?;
     let normalized_host = host.trim().trim_end_matches('/').to_string();
@@ -789,6 +800,7 @@ pub async fn sync_cli_config(
                 &[auth_path.clone(), config_path.clone(), models_path.clone()],
             )?;
 
+            // Write auth.json
             let mut auth_json = if auth_path.exists() {
                 fs::read_to_string(&auth_path)
                     .ok()
@@ -807,15 +819,56 @@ pub async fn sync_cli_config(
                 "OPENAI_API_KEY".to_string(),
                 serde_json::Value::String(api_key.trim().to_string()),
             );
+            write_json_file(&auth_path, &auth_json)?;
 
-            write_json_file(
-                &auth_path,
-                &auth_json,
-            )?;
+            // Generate nyro-models.json with ALL routes
+            let mut model_entries = Vec::new();
+            for route in &routes {
+                if !route.is_enabled { continue; }
+                model_entries.push(serde_json::json!({
+                    "slug": route.virtual_model,
+                    "display_name": route.name,
+                    "description": format!("Nyro: {} -> {}/{}",
+                        route.virtual_model, route.target_provider, route.target_model),
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                        {"effort": "medium", "description": "Balances speed and reasoning depth"},
+                        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+                    ],
+                    "context_window": 128000,
+                    "max_context_window": 128000,
+                    "effective_context_window_percent": 95,
+                    "supports_parallel_tool_calls": true,
+                    "supports_search_tool": false,
+                    "input_modalities": ["text"],
+                    "visibility": "list",
+                    "priority": 10,
+                    "shell_type": "shell_command",
+                    "supported_in_api": true,
+                    "additional_speed_tiers": [],
+                    "availability_nux": null,
+                    "upgrade": null,
+                    "supports_reasoning_summaries": true,
+                    "default_reasoning_summary": "auto",
+                    "support_verbosity": true,
+                    "default_verbosity": null,
+                    "apply_patch_tool_type": "freeform",
+                    "web_search_tool_type": "text",
+                    "truncation_policy": {"mode": "tokens", "limit": 10000},
+                    "supports_image_detail_original": false,
+                    "experimental_supported_tools": [],
+                }));
+            }
+            let catalog = serde_json::json!({"models": model_entries});
+            write_json_file(&models_path, &catalog)?;
 
+            // Write config.toml with model_catalog_json
+            let models_path_str = models_path.to_string_lossy().to_string();
             let config_lines = vec![
+                format!(r#"model_catalog_json = "{}""#, models_path_str),
                 r#"model_provider = "nyro""#.to_string(),
-                format!(r#"model = "{normalized_model}""#),
+                format!(r#"model = "{}""#, normalized_model),
                 r#"model_reasoning_effort = "high""#.to_string(),
                 r#"disable_response_storage = true"#.to_string(),
                 String::new(),
@@ -829,16 +882,11 @@ pub async fn sync_cli_config(
             let config_toml = config_lines.join("\n");
             write_text_file(&config_path, &config_toml)?;
 
-            let mut changed_paths = vec![
+            Ok(vec![
                 auth_path.to_string_lossy().to_string(),
                 config_path.to_string_lossy().to_string(),
-            ];
-            if models_path.exists() {
-                fs::remove_file(&models_path)
-                    .map_err(|e| format!("failed removing codex model catalog {}: {e}", models_path.display()))?;
-                changed_paths.push(models_path.to_string_lossy().to_string());
-            }
-            Ok(changed_paths)
+                models_path.to_string_lossy().to_string(),
+            ])
         }
         "gemini-cli" => {
             let env_path = get_gemini_env_path(&home_dir);
