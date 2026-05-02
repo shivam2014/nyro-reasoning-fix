@@ -858,14 +858,15 @@ pub async fn sync_cli_config(
                     "truncation_policy": {"mode": "tokens", "limit": 10000},
                     "supports_image_detail_original": false,
                     "experimental_supported_tools": [],
+                    "base_instructions": "",
                 }));
             }
             let catalog = serde_json::json!({"models": model_entries});
             write_json_file(&models_path, &catalog)?;
 
-            // Write config.toml with model_catalog_json
+            // Write config.toml with model_catalog_json, preserving non-Nyro sections
             let models_path_str = models_path.to_string_lossy().to_string();
-            let config_lines = vec![
+            let new_config_lines = vec![
                 format!(r#"model_catalog_json = "{}""#, models_path_str),
                 r#"model_provider = "nyro""#.to_string(),
                 format!(r#"model = "{}""#, normalized_model),
@@ -879,7 +880,49 @@ pub async fn sync_cli_config(
                 r#"wire_api = "responses""#.to_string(),
                 r#"requires_openai_auth = true"#.to_string(),
             ];
-            let config_toml = config_lines.join("\n");
+
+            // Preserve any non-Nyro sections from the existing config (e.g. Codex++ MCP servers)
+            let mut preserved = Vec::new();
+            if config_path.exists() {
+                let existing = fs::read_to_string(&config_path)
+                    .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
+                let mut in_nyro_block = false;
+                for line in existing.lines() {
+                    let trimmed = line.trim();
+                    // Skip Nyro-managed top-level keys
+                    if trimmed.starts_with("model_catalog_json =")
+                        || trimmed.starts_with("model_provider =")
+                        || trimmed.starts_with("model =")
+                        || trimmed.starts_with("model_reasoning_effort =")
+                        || trimmed.starts_with("disable_response_storage =")
+                    {
+                        continue;
+                    }
+                    // Track section boundaries: skip [model_providers] and [model_providers.nyro]
+                    if trimmed.starts_with('[') {
+                        if trimmed == "[model_providers]" || trimmed.starts_with("[model_providers.nyro]") {
+                            in_nyro_block = true;
+                            continue;
+                        }
+                        in_nyro_block = false;
+                    }
+                    if in_nyro_block {
+                        continue;
+                    }
+                    preserved.push(line.to_string());
+                }
+            }
+
+            let mut config_parts = Vec::new();
+            config_parts.push(new_config_lines.join("\n"));
+            if !preserved.is_empty() {
+                // Ensure a blank line separator before preserved content
+                if !new_config_lines.last().map_or(true, |s| s.is_empty()) {
+                    config_parts.push(String::new());
+                }
+                config_parts.push(preserved.join("\n"));
+            }
+            let config_toml = config_parts.join("\n");
             write_text_file(&config_path, &config_toml)?;
 
             Ok(vec![
