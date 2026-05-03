@@ -2959,6 +2959,19 @@ fn lookup_models_dev_capability(
     let data = parse_models_dev_data(data_dir).ok()?;
     match_models_dev_capability(&data, vendor_key, model)
 }
+/// Resolve the context window for a model, falling back to 128k if not found.
+/// This is used by the Tauri app to populate model_catalog_json.
+pub fn resolve_model_context_window(
+    data_dir: &Path,
+    vendor_key: &str,
+    model: &str,
+) -> u64 {
+    // First try exact vendor match, then fall back to fuzzy match
+    lookup_models_dev_capability(data_dir, vendor_key, model)
+        .or_else(|| fuzzy_match_models_dev(data_dir, model))
+        .map(|caps| caps.context_window)
+        .unwrap_or(128 * 1024)
+}
 
 fn fuzzy_match_models_dev(data_dir: &Path, model: &str) -> Option<ModelCapabilities> {
     let data = parse_models_dev_data(data_dir).ok()?;
