@@ -76,6 +76,7 @@ impl ResponseParser for OpenAIResponseParser {
             usage,
         })
     }
+
 }
 
 // ── Non-streaming response formatter ──
@@ -662,6 +663,7 @@ mod tests {
         assert!(has_text, "expected TextDelta('hello'), got: {deltas:?}");
         assert!(!has_reasoning, "should not have ReasoningDelta when no think tags, got: {deltas:?}");
     }
+<<<<<<< HEAD
 
     #[test]
     fn test_stream_usage_in_final_chunk() {
@@ -721,6 +723,8 @@ mod tests {
             usage["completion_tokens"].as_u64(),
         );
     }
+=======
+>>>>>>> 3947054feffc4542a03156e7b1aa01d73129db41
     #[test]
     fn test_extract_reasoning_mlx_field_name() {
         // mlx-lm uses "reasoning" instead of "reasoning_content".
