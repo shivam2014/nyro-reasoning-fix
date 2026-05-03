@@ -1,220 +1,179 @@
-# Fix: mlx-lm Reasoning Not Visible Through Nyro Router
+# Fix: MLX-LM Reasoning Field Name Not Captured by Nyro Router
 
-**Date:** 2026-05-03  
-**Branch:** `fix>local-mlx-reasoning-not-captured`  
-**Commit:** `afb489c`  
-**File changed:** `crates/nyro-core/src/protocol/codec/openai/stream.rs`  
-**Symptoms:** Reasoning/thinking output from mlx-lm is silently dropped when proxied through Nyro. Direct connection to mlx-lm works fine.
+## Problem
 
----
+When streaming chat completions from an **mlx-lm** server backend through the Nyro router, reasoning/thinking tokens were **silently dropped**. The final response would contain only the content text without any reasoning trace, even though the MLX server was correctly emitting reasoning tokens.
 
-## 1. Background: How Reasoning Flows Through the System
+This was affecting all clients using Nyro as a proxy to MLX-backed models (e.g., `Qwen-3.6-35B-A3B-mlx`). The same models worked correctly when accessed directly via the MLX server on port 8000.
 
-When you send a chat request through Nyro to mlx-lm, the data crosses four layers:
+## Root Cause
 
-```
-  Client (Codex / llama-webui)
-       │  POST /v1/chat/completions  {stream: true, messages: [...]}
-       ▼
-  ┌─────────────────────────────────────────┐
-  │           Nyro Router (:19530)          │
-  │                                         │
-  │  1. IngressDecoder (OpenAI)             │
-  │     body → InternalRequest              │
-  │                                         │
-  │  2. EgressEncoder (OpenAI)              │
-  │     InternalRequest → JSON body         │
-  │                                         │
-  │  3. ProxyClient.call_stream()           │
-  │     POST → upstream (mlx-lm :8000)      │
-  │                                         │
-  │  4. StreamParser (OpenAI)               │
-  │     upstream SSE bytes → StreamDelta[]  │
-  │     ◄── BUG LIVES HERE                  │
-  │                                         │
-  │  5. StreamFormatter (OpenAI)            │
-  │     StreamDelta[] → downstream SSE      │
-  │     ◄── BUG ALSO LIVES HERE (non-stream)│
-  │                                         │
-  └─────────────────────────────────────────┘
-       │  SSE stream / JSON response
-       ▼
-  Client sees final answer but no reasoning
-```
+### The Field Name Mismatch
 
-### The field-name convention
+MLX-LM's OpenAI-compatible server sends reasoning tokens using the field name `"reasoning"` in its streaming delta, while the **OpenAI API spec** (and therefore most clients) expects `"reasoning_content"`.
 
-The OpenAI Chat Completions API spec defines reasoning content in the `reasoning_content` field:
-
+**What MLX sends (direct, port 8000):**
 ```json
-{
-  "choices": [{
-    "delta": {
-      "reasoning_content": "the model's chain of thought"
-    }
-  }]
-}
+{"choices":[{"delta":{"reasoning":"step-by-step thinking..."},"finish_reason":null,"index":0}]}
 ```
 
-This is what DeepSeek, OpenAI o-series, and most reasoning models emit.
-
-**mlx-lm uses a different field name.** Looking at `mlx_lm/server.py` line 1444:
-
-```python
-choice[key_name]["reasoning"] = reasoning_text
-# key_name = "delta" for streaming, "message" for non-streaming
+**What OpenAI clients expect:**
+```json
+{"choices":[{"delta":{"reasoning_content":"step-by-step thinking..."},"finish_reason":null,"index":0}]}
 ```
 
-mlx-lm sends `reasoning` (without `_content` suffix).
+Nyro's `extract_reasoning_from_message()` function only checked for `"reasoning_content"` and `"reasoning_details"`, so MLX's `"reasoning"` field was simply ignored.
 
----
+### Two Missing Paths
 
-## 2. Root Cause Analysis
+The bug manifested in two places within `crates/nyro-core/src/protocol/codec/openai/stream.rs`:
 
-### Bug A: `extract_reasoning_from_message` only checks `reasoning_content`
+1. **Streaming path** (`format_streaming_event` / `extract_reasoning_from_message`):  
+   When parsing each streaming delta chunk, the function `extract_reasoning_from_message()` looked at `message.get("reasoning_content")` but had no fallback for `message.get("reasoning")`. MLX's `"reasoning"` field was silently ignored.
 
-**File:** `crates/nyro-core/src/protocol/codec/openai/stream.rs`  
-**BEFORE (line 496):**
+2. **Non-streaming path** (`format_response`):  
+   When the backend returned a non-streaming (buffered) response with a `reasoning` field, the response object's `reasoning_content` field was never populated from it, so the final response omitted reasoning entirely.
 
-```rust
-pub(crate) fn extract_reasoning_from_message(message: &Value) -> Option<String> {
-    // Only knows about "reasoning_content"
-    if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
-        return Some(reasoning.to_string());
-    }
-    // Also handles "reasoning_details" array format, but not "reasoning"
-    let details = message.get("reasoning_details")...
-}
-```
+## The Fix
 
-This function is called from **two places**, so a single fix covers both paths:
+### File: `crates/nyro-core/src/protocol/codec/openai/stream.rs`
 
-**Path 1 — Non-streaming response parser** (`OpenAIResponseParser::parse_response`, line 29):
-```rust
-let reasoning_content = message.and_then(extract_reasoning_from_message);
-```
+#### Change 1: `extract_reasoning_from_message()` — Add `"reasoning"` fallback
 
-**Path 2 — Streaming chunk parser** (`OpenAIStreamParser::parse_openai_chunk`, line 230):
-```rust
-if let Some(reasoning) = extract_reasoning_from_message(delta) {
-    if !reasoning.is_empty() {
-        deltas.push(StreamDelta::ReasoningDelta(reasoning));
-    }
-}
-```
-
-Since the MLX server sends `{"delta": {"reasoning": "..."}}` (not `{"delta": {"reasoning_content": "..."}}`), extract returns `None` and **no ReasoningDelta is ever emitted** — the reasoning is silently discarded.
-
-### Bug B: Non-streaming formatter drops reasoning_content
-
-Even when `InternalResponse.reasoning_content` IS populated (e.g., from a spec-compliant backend), the non-streaming response formatter never includes it in the output.
-
-**BEFORE (line 88):**
-
-```rust
-impl ResponseFormatter for OpenAIResponseFormatter {
-    fn format_response(&self, resp: &InternalResponse) -> Value {
-        let mut message = serde_json::json!({
-            "role": "assistant",
-            "content": resp.content,
-        });
-        // reasoning_content is never added to message
-        // ... tool_calls handling ...
-    }
-}
-```
-
-So a non-streaming request would **always** lose reasoning, even from backends using the correct field name.
-
-### Why llama-webui works fine
-
-The llama-webui `server.py` has `SseTimingInjector._fix_reasoning_field()` which renames the field before forwarding:
-
-```python
-def _fix_reasoning_field(self, data):
-    delta = data["choices"][0].get("delta")
-    if delta is not None and "reasoning" in delta:
-        delta["reasoning_content"] = delta.pop("reasoning")
-```
-
-Nyro had no equivalent code.
-
----
-
-## 3. The Fix
-
-### Change 1 — Accept both field names
-
-**AFTER (line 496):**
-
+**Before (line ~502):**
 ```rust
 pub(crate) fn extract_reasoning_from_message(message: &Value) -> Option<String> {
     if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
         return Some(reasoning.to_string());
     }
-    // NEW: Also accept "reasoning" (mlx-lm compat)
+    // ... check reasoning_details ...
+}
+```
+
+**After:**
+```rust
+pub(crate) fn extract_reasoning_from_message(message: &Value) -> Option<String> {
+    if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
+        return Some(reasoning.to_string());
+    }
+    // Some backends (e.g. mlx-lm) send the field as "reasoning" instead
+    // of "reasoning_content".  Accept both.
     if let Some(reasoning) = message.get("reasoning").and_then(|v| v.as_str()) {
         return Some(reasoning.to_string());
     }
-    // ... rest unchanged
+    let details = message.get("reasoning_details").and_then(|v| v.as_array())?;
+    // ...
 }
 ```
 
-### Change 2 — Emit reasoning_content in non-streaming responses
+#### Change 2: `format_response()` — Populate `reasoning_content` in non-streaming output
 
-**AFTER (line 88):**
-
+**Before (around line 71):**
 ```rust
-let mut message = serde_json::json!({
-    "role": "assistant",
-    "content": resp.content,
-});
-// NEW: Include reasoning_content when present
+StreamOutput {
+    content: message_content,
+    reasoning_content: None,  // Was never populated from non-streaming response
+    reasoning_signature: None,
+}
+```
+
+**After:**
+```rust
+let reasoning_content = message.and_then(extract_reasoning_from_message);
+// ...
+StreamOutput {
+    content: message_content,
+    reasoning_content,
+    reasoning_signature: None,
+}
+```
+
+And in the JSON serialization:
+```rust
 if let Some(ref reasoning) = resp.reasoning_content {
-    message
-        .as_object_mut()
+    obj.as_object_mut()
         .unwrap()
         .insert("reasoning_content".into(), Value::String(reasoning.clone()));
 }
 ```
 
----
+## Data Flow Diagram
 
-## 4. Test Coverage
-
-Four tests were added to the `mod tests` block in the same file:
-
-| Test | What it proves |
-|------|---------------|
-| `test_extract_reasoning_mlx_field_name` | `extract_reasoning_from_message` returns `Some("my reasoning")` given `{"reasoning": "my reasoning"}` |
-| `test_parse_response_with_reasoning_field` | `OpenAIResponseParser` populates `reasoning_content` from a JSON response containing `"reasoning"` field |
-| `test_format_response_includes_reasoning_content` | `OpenAIResponseFormatter` emits `"reasoning_content"` key in the output message when `InternalResponse.reasoning_content` is `Some` |
-| `test_stream_reasoning_field_from_mlx` | `OpenAIStreamParser` emits `StreamDelta::ReasoningDelta` from SSE chunks containing `"reasoning"` in the delta object |
-
-All 125 tests pass (58 unit + 67 integration) with zero regressions.
-
----
-
-## 5. How to Verify on Real Hardware
-
-```bash
-# 1. Rebuild Nyro
-cd /Users/shivam94/nyro-mod/nyro-src
-cargo build --release
-
-# 2. Restart Nyro with the new binary
-
-# 3. Test streaming (SSE)
-curl -N http://localhost:19530/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-35b","messages":[{"role":"user","content":"Count to 3 slowly"}],"stream":true}' \
-  | grep reasoning_content
-
-# 4. Test non-streaming
-curl http://localhost:19530/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-35b","messages":[{"role":"user","content":"Count to 3 slowly"}],"stream":false}' \
-  | python3 -m json.tool | grep reasoning_content
+```
+MLX-LM Server (port 8000)
+  │
+  │  Streaming delta chunk:
+  │  {"choices":[{"delta":{"reasoning":"step 1..."}}]}
+  │                                     ↑
+  │                           Field name: "reasoning"
+  │
+  ▼
+Nyro Router (port 19530)
+  │
+  │  extract_reasoning_from_message():
+  │    ├── checks "reasoning_content" → None
+  │    ├── checks "reasoning" → Some("step 1...")  ← NEW FALLBACK
+  │    └── returns Some("step 1...")
+  │
+  │  Output to client:
+  │  {"choices":[{"delta":{"reasoning_content":"step 1..."}}]}
+  │                                     ↑
+  │                           Field name: "reasoning_content"
+  │
+  ▼
+Client (Codex, llama-webui, etc.)
+  │  Receives standard OpenAI-compatible
+  │  reasoning_content deltas
 ```
 
-You should see `"reasoning_content"` appear in the response for both streaming and non-streaming calls.
+## Verification
+
+### Direct MLX (port 8000) — raw `"reasoning"` field:
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<model-path>","messages":[{"role":"user","content":"..."}],"stream":true}' \
+  | grep -o '"reasoning":"[^"]*"'
+```
+Shows: `"reasoning":"Here"`, `"reasoning":"'s"`, etc.
+
+### Through Nyro (port 19530) — translated to `"reasoning_content"`:
+```bash
+curl -s http://localhost:19530/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<route-name>","messages":[{"role":"user","content":"..."}],"stream":true}' \
+  | grep -o '"reasoning_content":"[^"]*"'
+```
+Shows: `"reasoning_content":"Here"`, `"reasoning_content":"'s"`, etc.
+
+### Count reasoning tokens:
+```bash
+# Direct MLX: Count "reasoning" field occurrences
+curl -s http://localhost:8000/v1/chat/completions ... \
+  | tr ',' '\n' | grep -c '"reasoning"'
+
+# Through Nyro: Count "reasoning_content" field occurrences
+curl -s http://localhost:19530/v1/chat/completions ... \
+  | tr ',' '\n' | grep -c '"reasoning_content"'
+```
+Both should return approximately the same count (~200–300 for a reasoning-heavy prompt).
+
+## Unit Tests
+
+Four tests were added/updated to cover both field names and both streaming/non-streaming paths:
+
+| Test | What it validates |
+|------|------------------|
+| `test_parse_response_with_reasoning_content` | Non-streaming response with `"reasoning_content"` |
+| `test_parse_response_with_mlx_reasoning` | Non-streaming response with `"reasoning"` (MLX format) |
+| `test_parse_streaming_delta_with_reasoning_content` | Streaming delta with `"reasoning_content"` |
+| `test_parse_streaming_delta_with_mlx_reasoning` | Streaming delta with `"reasoning"` (MLX format) |
+
+```bash
+cargo test -p nyro-core --lib -- protocol::codec::openai::stream::tests
+```
+
+## Related Notes
+
+- The continuous `/v1/models` polling spam on port 8000 was traced to **llama-webui**, not Nyro. Nyro uses a standard model discovery mechanism.
+- The MLX server is started with `--chat-template-args '{"enable_thinking":true, "preserve_thinking": true}'` to ensure reasoning tokens are emitted and preserved.
