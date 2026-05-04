@@ -1,3 +1,4 @@
+use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
@@ -28,11 +29,19 @@ pub fn create_router(gateway: Gateway) -> Router {
 
     let cors = build_proxy_cors_layer(&gateway.config.proxy_cors_origins, gateway.config.proxy_port);
 
-    router
+    let mut app = router
         .layer(middleware::from_fn(inject_context))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(gateway)
+        .with_state(gateway.clone());
+
+    // Increase default body limit from Axum's 2 MiB for large payloads
+    // (e.g. Responses API with base64 images). Configurable via proxy_body_limit.
+    if gateway.config.proxy_body_limit > 0 {
+        app = app.layer(DefaultBodyLimit::max(gateway.config.proxy_body_limit as usize));
+    }
+
+    app
 }
 
 async fn health() -> &'static str {

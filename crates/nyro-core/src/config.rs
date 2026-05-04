@@ -78,6 +78,7 @@ pub struct GatewayConfig {
     pub proxy_host: String,
     pub proxy_port: u16,
     pub proxy_cors_origins: Vec<String>,
+    pub proxy_body_limit: u32,  // max request body in bytes (0 = use Axum default)
     pub data_dir: PathBuf,
     pub auth_key: Option<String>,
     pub storage: GatewayStorageConfig,
@@ -90,6 +91,7 @@ impl Default for GatewayConfig {
             proxy_host: "127.0.0.1".to_string(),
             proxy_port: 19530,
             proxy_cors_origins: Vec::new(),
+            proxy_body_limit: 200 * 1024 * 1024,  // 200 MiB
             data_dir: default_data_dir(),
             auth_key: None,
             storage: GatewayStorageConfig::default(),
