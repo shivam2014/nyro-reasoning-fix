@@ -694,6 +694,128 @@ pub struct RouteSyncInfo {
     pub route_type: String,
 }
 
+
+/// Update a Codex config.toml string by surgically replacing only Nyro-managed
+/// lines. Preserves all non-Nyro content in-place, including section ordering,
+/// comments, and blank lines.
+///
+/// Three cases:
+/// - Nyro key exists at top level → replaced in-place
+/// - Nyro key missing → prepended before first `[section]`
+/// - `[model_providers]` section exists → content replaced
+/// - `[model_providers]` section missing → appended at end
+fn update_codex_config_toml(
+    existing: Option<&str>,
+    models_path: &str,
+    normalized_model: &str,
+    normalized_host: &str,
+) -> String {
+    // Build Nyro-managed top-level key→value pairs
+    let nyro_keys: Vec<(&str, String)> = vec![
+        ("model_catalog_json",
+         format!(r#"model_catalog_json = "{}""#, models_path)),
+        ("model_provider",
+         r#"model_provider = "nyro""#.to_string()),
+        ("model",
+         format!(r#"model = "{}""#, normalized_model)),
+        ("model_reasoning_effort",
+         r#"model_reasoning_effort = "high""#.to_string()),
+        ("disable_response_storage",
+         r#"disable_response_storage = true"#.to_string()),
+    ];
+
+    // Nyro [model_providers] section content
+    let nyro_section: Vec<String> = vec![
+        r#"[model_providers]"#.to_string(),
+        r#"[model_providers.nyro]"#.to_string(),
+        r#"name = "Nyro Gateway""#.to_string(),
+        format!(r#"base_url = "{}/v1""#, normalized_host),
+        r#"wire_api = "responses""#.to_string(),
+        r#"requires_openai_auth = true"#.to_string(),
+    ];
+
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut found_keys: Vec<&str> = Vec::new();
+    let mut in_nyro_section = false;
+    let mut nyro_section_written = false;
+    let mut top_level = true; // before first `[section]` header
+
+    if let Some(existing_text) = existing {
+        for line in existing_text.lines() {
+            let trimmed = line.trim();
+            let is_header = trimmed.starts_with('[');
+
+            if is_header {
+                top_level = false;
+                if trimmed.starts_with("[model_providers]")
+                    || trimmed.starts_with("[model_providers.nyro]")
+                {
+                    in_nyro_section = true;
+                    if !nyro_section_written {
+                        out_lines.extend(nyro_section.iter().cloned());
+                        nyro_section_written = true;
+                    }
+                    continue;
+                }
+                if in_nyro_section {
+                    in_nyro_section = false;
+                }
+            }
+
+            if in_nyro_section {
+                continue;
+            }
+
+            // In top-level region: replace Nyro-managed keys in-place
+            if top_level && !is_header && !trimmed.starts_with('#') {
+                let mut replaced = false;
+                for &(key, ref new_val) in &nyro_keys {
+                    if trimmed.starts_with(&format!("{} =", key))
+                        || trimmed.starts_with(&format!("{}=", key))
+                    {
+                        out_lines.push(new_val.clone());
+                        found_keys.push(key);
+                        replaced = true;
+                        break;
+                    }
+                }
+                if replaced {
+                    continue;
+                }
+            }
+
+            out_lines.push(line.to_string());
+        }
+    }
+
+    // If input ended while still inside [model_providers] (no later section)
+    if in_nyro_section && !nyro_section_written {
+        out_lines.extend(nyro_section.iter().cloned());
+        nyro_section_written = true;
+    }
+
+    // Prepend any Nyro top-level keys missing from the existing config
+    let mut missing_keys: Vec<String> = Vec::new();
+    for &(key, ref val) in &nyro_keys {
+        if !found_keys.contains(&key) {
+            missing_keys.push(val.clone());
+        }
+    }
+    if !missing_keys.is_empty() {
+        missing_keys.push(String::new());
+        missing_keys.extend(out_lines);
+        out_lines = missing_keys;
+    }
+
+    // Append [model_providers] section if it didn't exist at all
+    if !nyro_section_written {
+        out_lines.push(String::new());
+        out_lines.extend(nyro_section.iter().cloned());
+    }
+
+    out_lines.join("\n")
+}
+
 #[tauri::command]
 pub async fn sync_cli_config(
     gw: State<'_, Gateway>,
@@ -870,65 +992,17 @@ pub async fn sync_cli_config(
             let catalog = serde_json::json!({"models": model_entries});
             write_json_file(&models_path, &catalog)?;
 
-            // Write config.toml with model_catalog_json, preserving non-Nyro sections
+            // ── Update config.toml: replace only Nyro-managed lines, leave rest untouched ──
             let models_path_str = models_path.to_string_lossy().to_string();
-            let new_config_lines = vec![
-                format!(r#"model_catalog_json = "{}""#, models_path_str),
-                r#"model_provider = "nyro""#.to_string(),
-                format!(r#"model = "{}""#, normalized_model),
-                r#"model_reasoning_effort = "high""#.to_string(),
-                r#"disable_response_storage = true"#.to_string(),
-                String::new(),
-                r#"[model_providers]"#.to_string(),
-                r#"[model_providers.nyro]"#.to_string(),
-                r#"name = "Nyro Gateway""#.to_string(),
-                format!(r#"base_url = "{}/v1""#, normalized_host),
-                r#"wire_api = "responses""#.to_string(),
-                r#"requires_openai_auth = true"#.to_string(),
-            ];
-
-            // Preserve any non-Nyro sections from the existing config (e.g. Codex++ MCP servers)
-            let mut preserved = Vec::new();
-            if config_path.exists() {
-                let existing = fs::read_to_string(&config_path)
-                    .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
-                let mut in_nyro_block = false;
-                for line in existing.lines() {
-                    let trimmed = line.trim();
-                    // Skip Nyro-managed top-level keys
-                    if trimmed.starts_with("model_catalog_json =")
-                        || trimmed.starts_with("model_provider =")
-                        || trimmed.starts_with("model =")
-                        || trimmed.starts_with("model_reasoning_effort =")
-                        || trimmed.starts_with("disable_response_storage =")
-                    {
-                        continue;
-                    }
-                    // Track section boundaries: skip [model_providers] and [model_providers.nyro]
-                    if trimmed.starts_with('[') {
-                        if trimmed == "[model_providers]" || trimmed.starts_with("[model_providers.nyro]") {
-                            in_nyro_block = true;
-                            continue;
-                        }
-                        in_nyro_block = false;
-                    }
-                    if in_nyro_block {
-                        continue;
-                    }
-                    preserved.push(line.to_string());
-                }
-            }
-
-            let mut config_parts = Vec::new();
-            config_parts.push(new_config_lines.join("\n"));
-            if !preserved.is_empty() {
-                // Ensure a blank line separator before preserved content
-                if !new_config_lines.last().map_or(true, |s| s.is_empty()) {
-                    config_parts.push(String::new());
-                }
-                config_parts.push(preserved.join("\n"));
-            }
-            let config_toml = config_parts.join("\n");
+            let config_toml = update_codex_config_toml(
+                config_path.exists().then(|| {
+                    fs::read_to_string(&config_path)
+                        .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))
+                }).transpose()?.as_deref(),
+                &models_path_str,
+                &normalized_model,
+                &normalized_host,
+            );
             write_text_file(&config_path, &config_toml)?;
 
             Ok(vec![
@@ -1070,4 +1144,200 @@ pub async fn detect_cli_tools() -> Result<HashMap<String, bool>, String> {
     }
 
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_updates_existing_keys_in_place() {
+        let existing = r#"model_catalog_json = "/Users/shivam94/.codex/nyro-models.json"
+model_provider = "nyro"
+model = "deepseek-v4-flash-2"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[features]
+goals = true
+
+[plugins."browser-use@openai-bundled"]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/path/nyro-models.json",
+            "gpt-5.3-codex",
+            "http://localhost:19530",
+        );
+
+        // Nyro keys should be updated
+        assert!(result.contains(r#"model_catalog_json = "/new/path/nyro-models.json""#),
+            "model_catalog_json should update to new path");
+        assert!(result.contains(r#"model = "gpt-5.3-codex""#),
+            "model should update to new value");
+
+        // Non-Nyro sections preserved as-is
+        assert!(result.contains("[features]\ngoals = true"),
+            "features section preserved");
+        assert!(result.contains(r#"[plugins."browser-use@openai-bundled"]"#),
+            "plugin section preserved");
+
+        // model_providers section should be appended at end (wasn't in input)
+        assert!(result.trim().ends_with(
+            "[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://localhost:19530/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
+        ), "model_providers section should be at end of output");
+    }
+
+    #[test]
+    fn test_no_nyro_keys_prepends_them() {
+        let existing = r#"approvals_reviewer = "user"
+personality = "pragmatic"
+suppress_unstable_features_warning = true
+
+[features]
+goals = true
+
+[plugins."browser-use@openai-bundled"]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/path/models.json",
+            "qwen-3.6-27b",
+            "http://localhost:19530",
+        );
+
+        // All 5 Nyro keys should appear at the top (prepended)
+        assert!(result.starts_with(r#"model_catalog_json = "/path/models.json""#),
+            "model_catalog_json should be first line");
+        assert!(result.contains("\nmodel_provider = \"nyro\"\n"),
+            "model_provider should be present");
+        assert!(result.contains("\nmodel = \"qwen-3.6-27b\"\n"),
+            "model should be present");
+
+        // Original top-level keys preserved
+        assert!(result.contains("approvals_reviewer = \"user\""),
+            "approvals_reviewer preserved");
+        assert!(result.contains("suppress_unstable_features_warning = true"),
+            "suppress_unstable_features_warning preserved");
+
+        // Sections preserved
+        assert!(result.contains("[features]\ngoals = true"),
+            "features section preserved");
+
+        // model_providers at end
+        assert!(result.trim().ends_with(
+            "[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://localhost:19530/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
+        ), "model_providers section should be appended");
+    }
+
+    #[test]
+    fn test_replaces_existing_model_providers_section() {
+        let existing = r#"model_catalog_json = "old.json"
+model_provider = "nyro"
+model = "old-model"
+
+[model_providers]
+[model_providers.nyro]
+name = "Old Gateway"
+base_url = "http://old:19530/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[features]
+goals = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/path/models.json",
+            "new-model",
+            "http://new:19530",
+        );
+
+        // Nyro keys updated in-place
+        assert!(result.contains(r#"model_catalog_json = "/new/path/models.json""#));
+        assert!(result.contains(r#"model = "new-model""#));
+
+        // model_providers content replaced
+        assert!(result.contains("[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://new:19530/v1\""));
+        // Old section content gone
+        assert!(!result.contains("Old Gateway"));
+        assert!(!result.contains("http://old:19530"));
+
+        // Section after model_providers preserved
+        assert!(result.contains("[features]\ngoals = true"));
+    }
+
+    #[test]
+    fn test_empty_config_creates_fresh() {
+        let result = update_codex_config_toml(
+            None,
+            "/fresh/models.json",
+            "fresh-model",
+            "http://fresh:19530",
+        );
+
+        assert!(result.starts_with("model_catalog_json = \"/fresh/models.json\""),
+            "starts with model_catalog_json");
+        assert!(result.contains("[model_providers]\n[model_providers.nyro]"),
+            "contains model_providers section");
+        assert!(result.contains("base_url = \"http://fresh:19530/v1\""),
+            "contains new host");
+    }
+
+    #[test]
+    fn test_commented_nyro_keys_not_replaced() {
+        let existing = r#"# model_catalog_json = "commented-out.json"
+model_provider = "existing"
+
+[features]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/models.json",
+            "new-model",
+            "http://h:19530",
+        );
+
+        // Commented line preserved as-is
+        assert!(result.contains("# model_catalog_json = \"commented-out.json\""),
+            "commented line preserved");
+        // New key prepended since commented version doesn't count
+        assert!(result.contains("model_catalog_json = \"/new/models.json\""),
+            "new key added for commented-out one");
+    }
+
+    #[test]
+    fn test_partial_nyro_keys_missing_ones_prepended() {
+        let existing = r#"model = "existing-model"
+
+[features]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/models.json",
+            "new-model",
+            "http://h:19530",
+        );
+
+        // Existing key replaced
+        assert!(result.contains(r#"model = "new-model""#));
+        assert!(!result.contains(r#"model = "existing-model""#));
+
+        // Missing keys prepended
+        assert!(result.starts_with("model_catalog_json = \"/new/models.json\""),
+            "missing model_catalog_json prepended");
+
+        // Section preserved
+        assert!(result.contains("[features]\nenabled = true"),
+            "section preserved");
+    }
 }
