@@ -1738,3 +1738,111 @@ fn responses_response_parser_extracts_text_tool_calls_and_usage() {
     assert_eq!(resp.tool_calls[0].name, "search");
     assert_eq!(resp.tool_calls[0].arguments, "{\"q\":\"rust\"}");
 }
+
+#[test]
+fn openai_encoder_flattens_system_messages_to_position_0() {
+    let req = InternalRequest {
+        messages: vec![
+            InternalMessage {
+                role: Role::System,
+                content: MessageContent::Text("You are a helpful assistant.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+            InternalMessage {
+                role: Role::User,
+                content: MessageContent::Text("Hello".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+            InternalMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text("Hi".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+            // This is what Codex does — re-inject developer/system at arbitrary position.
+            InternalMessage {
+                role: Role::System,
+                content: MessageContent::Text("<permissions>restricted</permissions>".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+            InternalMessage {
+                role: Role::User,
+                content: MessageContent::Text("try again".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+        ],
+        model: "test-model".to_string(),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        tools: None,
+        tool_choice: None,
+        source_protocol: OPENAI_RESPONSES_V1,
+        extra: Default::default(),
+    };
+
+    let (body, _) = OpenAIEncoder
+        .encode_request(&req)
+        .expect("encode openai body");
+    let messages = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .expect("messages array");
+
+    // Must have a system message at position 0
+    assert_eq!(
+        messages[0].get("role").and_then(|v| v.as_str()),
+        Some("system"),
+        "messages[0] must be system role"
+    );
+    let sys_content = messages[0]
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("system content must be a string");
+    // All system content must be merged
+    assert!(
+        sys_content.contains("You are a helpful assistant"),
+        "should contain first system text"
+    );
+    assert!(
+        sys_content.contains("<permissions>"),
+        "should contain later system text"
+    );
+
+    // No other system messages should exist in the array
+    for (i, msg) in messages.iter().enumerate().skip(1) {
+        assert_ne!(
+            msg.get("role").and_then(|v| v.as_str()),
+            Some("system"),
+            "system message found at index {}, should only be at [0]",
+            i
+        );
+    }
+
+    // Non-system messages must retain their original order
+    assert_eq!(
+        messages[1].get("role").and_then(|v| v.as_str()),
+        Some("user"),
+        "messages[1] should be user"
+    );
+    assert_eq!(
+        messages[2].get("role").and_then(|v| v.as_str()),
+        Some("assistant"),
+        "messages[2] should be assistant"
+    );
+    assert_eq!(
+        messages[3].get("role").and_then(|v| v.as_str()),
+        Some("user"),
+        "messages[3] should be user"
+    );
+}

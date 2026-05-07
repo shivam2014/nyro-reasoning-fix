@@ -11,7 +11,9 @@ pub struct OpenAIEncoder;
 
 impl EgressEncoder for OpenAIEncoder {
     fn encode_request(&self, req: &InternalRequest) -> Result<(Value, HeaderMap)> {
-        let normalized_messages = normalize_messages_for_openai(&req.messages, req.tools.as_deref());
+        let mut messages = req.messages.clone();
+        flatten_system_messages(&mut messages);
+        let normalized_messages = normalize_messages_for_openai(&messages, req.tools.as_deref());
         let messages: Vec<Value> = normalized_messages
             .iter()
             .map(encode_message)
@@ -95,6 +97,39 @@ impl EgressEncoder for OpenAIEncoder {
 
     fn egress_path(&self, _model: &str, _stream: bool) -> String {
         "/v1/chat/completions".to_string()
+    }
+}
+
+
+/// Merge all `Role::System` messages into one at position 0.
+///
+/// Qwen3.6's Jinja chat template enforces that system messages must be
+/// at index 0.  Codex sends `role: "developer"` items at arbitrary
+/// positions in the Responses API `input[]` array, which the
+/// ResponsesDecoder maps to `Role::System` verbatim.  This normalizer
+/// collects all system messages, concatenates their text content with
+/// `"\n\n"`, and places the merged result at `messages[0]`.
+fn flatten_system_messages(messages: &mut Vec<InternalMessage>) {
+    let mut system_parts: Vec<String> = Vec::new();
+    messages.retain(|m| {
+        if m.role == Role::System {
+            let t = m.content.as_text();
+            if !t.is_empty() {
+                system_parts.push(t);
+            }
+            false
+        } else {
+            true
+        }
+    });
+    if !system_parts.is_empty() {
+        messages.insert(0, InternalMessage {
+            role: Role::System,
+            content: MessageContent::Text(system_parts.join("\n\n")),
+            tool_calls: None,
+            tool_call_id: None,
+            extra: std::collections::HashMap::new(),
+        });
     }
 }
 
