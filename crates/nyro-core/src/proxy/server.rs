@@ -12,36 +12,39 @@ use super::ingress;
 use crate::Gateway;
 
 pub fn create_router(gateway: Gateway) -> Router {
+    let limit = gateway.config.proxy_body_limit as usize;
     let router = Router::new()
-        .route("/v1/chat/completions", post(ingress::openai_chat::openai_chat))
-        .route("/chat/completions", post(ingress::openai_chat::openai_chat))
-        .route("/v1/responses", post(ingress::openai_responses::openai_responses))
-        .route("/responses", post(ingress::openai_responses::openai_responses))
-        .route("/v1/messages", post(ingress::anthropic_messages::anthropic_messages))
-        .route("/messages", post(ingress::anthropic_messages::anthropic_messages))
-        .route("/v1/embeddings", post(ingress::openai_embeddings::openai_embeddings))
-        .route("/embeddings", post(ingress::openai_embeddings::openai_embeddings))
-        .route("/v1beta/models/:model_action", post(ingress::google_generate::google_generate))
-        .route("/models/:model_action", post(ingress::google_generate::google_generate))
+        .route("/v1/chat/completions", post(ingress::openai_chat::openai_chat)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/chat/completions", post(ingress::openai_chat::openai_chat)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/v1/responses", post(ingress::openai_responses::openai_responses)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/responses", post(ingress::openai_responses::openai_responses)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/v1/messages", post(ingress::anthropic_messages::anthropic_messages)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/messages", post(ingress::anthropic_messages::anthropic_messages)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/v1/embeddings", post(ingress::openai_embeddings::openai_embeddings)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/embeddings", post(ingress::openai_embeddings::openai_embeddings)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/v1beta/models/:model_action", post(ingress::google_generate::google_generate)
+            .layer(DefaultBodyLimit::max(limit)))
+        .route("/models/:model_action", post(ingress::google_generate::google_generate)
+            .layer(DefaultBodyLimit::max(limit)))
         .route("/v1/models", get(handler::models_list))
         .route("/models", get(handler::models_list))
         .route("/health", get(health));
 
     let cors = build_proxy_cors_layer(&gateway.config.proxy_cors_origins, gateway.config.proxy_port);
 
-    let mut app = router
+    router
         .layer(middleware::from_fn(inject_context))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(gateway.clone());
-
-    // Increase default body limit from Axum's 2 MiB for large payloads
-    // (e.g. Responses API with base64 images). Configurable via proxy_body_limit.
-    if gateway.config.proxy_body_limit > 0 {
-        app = app.layer(DefaultBodyLimit::max(gateway.config.proxy_body_limit as usize));
-    }
-
-    app
+        .with_state(gateway)
 }
 
 async fn health() -> &'static str {
