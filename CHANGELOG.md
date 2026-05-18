@@ -4,6 +4,35 @@ All notable changes to Nyro will be documented in this file.
 
 ---
 
+## v1.7.3
+
+> Released on 2026-05-18
+
+#### Features
+
+- **IR and protocol codec pipeline overhaul** (#145–#153): reshape the internal request/response representation around `AiRequest`, `AiResponse`, `AiStreamDelta`, expanded `ContentBlock`, `AiError`, `CacheControl`, and `ProtocolExt`; switch ingress decoders, egress encoders, response/stream parsers, dispatcher, provider adapters, and cache flow to consume the new IR directly; remove the legacy `InternalRequest` / `InternalResponse` path and align codec traits on the `Decoder` / `Encoder` vocabulary
+- **Request log metadata enrichment** (#154): persist `provider_name`, `api_key_name`, `route_id`, and `route_name` alongside request logs, and restore `is_stream` capture for stream/non-stream visibility
+- **Prompt-cache usage accounting** (#156): capture chat-completions prompt-cache hit tokens so cache-read usage is preserved in downstream accounting
+
+#### Fixes
+
+- **Protocol conversion thinking preservation** (#157): bridge Anthropic thinking blocks into OpenAI-compatible `reasoning_content`
+- **OpenAI Responses streaming usage** (#140): preserve `input_tokens` across streaming usage deltas
+- **WebUI log detail loading** (#139): map `backend("get_log")` to `GET /api/v1/logs/:id`
+- **Provider icons** (#133, #134): fix undefined provider icons in add/edit flows and correctly display empty custom icons
+- **macOS app lifecycle** (#132): reopen the main window when the Dock icon is clicked
+- **musl build warnings** (#130): silence dead-code warnings on musl builds
+
+#### Refactoring / Internal
+
+- Restructure proxy ingress code into protocol-specific subdirectories (#135)
+- Replace `capabilities_source` string handling with typed `CapabilitiesSource` presets (#136)
+- Remove `route_type` and endpoint subset filtering from route handling (#137)
+- Split dispatcher internals with `CallCtx`, `CacheWriteCtx`, `RequestExtras`, `LogBuilder`, integrations hooks, routing strategies, and module renames (#141–#143)
+- Add the IR field-homing design skeleton and follow-up deprecation/test/doc cleanup (#138, #144)
+
+---
+
 ## v1.7.2
 
 > Released on 2026-05-12

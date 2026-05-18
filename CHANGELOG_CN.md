@@ -4,6 +4,35 @@ Nyro 的所有重要变更均记录在此文件中。
 
 ---
 
+## v1.7.3
+
+> 发布于 2026-05-18
+
+#### 功能
+
+- **IR 与协议 codec 流水线重构** (#145–#153)：围绕 `AiRequest`、`AiResponse`、`AiStreamDelta`、扩展后的 `ContentBlock`、`AiError`、`CacheControl` 和 `ProtocolExt` 重塑内部请求/响应表示；入口 decoder、出口 encoder、响应/流式 parser、dispatcher、provider adapter 与 cache 流程均改为直接消费新 IR；移除旧 `InternalRequest` / `InternalResponse` 路径，并将 codec trait 命名统一到 `Decoder` / `Encoder`
+- **请求日志元数据增强** (#154)：请求日志新增持久化 `provider_name`、`api_key_name`、`route_id`、`route_name`，并恢复 `is_stream` 记录，便于区分流式/非流式请求
+- **Prompt cache usage 统计** (#156)：补齐 Chat Completions prompt-cache 命中 token 采集，确保 cache-read usage 能进入下游统计
+
+#### 修复
+
+- **协议转换思考内容保留** (#157)：将 Anthropic thinking block 桥接到 OpenAI-compatible `reasoning_content`
+- **OpenAI Responses 流式 usage** (#140)：修复流式 usage delta 中 `input_tokens` 丢失的问题
+- **WebUI 日志详情加载** (#139)：将 `backend("get_log")` 正确映射到 `GET /api/v1/logs/:id`
+- **Provider 图标显示** (#133, #134)：修复新增/编辑 Provider 时图标为 `undefined`，以及自定义空图标显示异常的问题
+- **macOS 应用生命周期** (#132)：点击 Dock 图标时重新打开主窗口
+- **musl 构建告警** (#130)：消除 musl 构建下的 dead-code warning
+
+#### 重构 / 内部
+
+- 将 proxy ingress 代码按协议拆分到独立子目录 (#135)
+- 用类型化 `CapabilitiesSource` preset 替代 `capabilities_source` 字符串处理 (#136)
+- 移除 route 处理中的 `route_type` 字段和 endpoint subset filtering (#137)
+- 拆分 dispatcher 内部结构，引入 `CallCtx`、`CacheWriteCtx`、`RequestExtras`、`LogBuilder`、integrations hooks、routing strategies 与模块重命名 (#141–#143)
+- 新增 IR field-homing 设计骨架，并补充弃用告警、测试与文档清理 (#138, #144)
+
+---
+
 ## v1.7.2
 
 > 发布于 2026-05-12
