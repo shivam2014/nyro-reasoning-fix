@@ -199,6 +199,17 @@ function defaultModelsEndpoint(baseUrl: string, protocol: ProviderProtocol) {
   return "";
 }
 
+function isVertexProviderSelection(value?: Pick<CreateProvider, "vendor" | "preset_key"> | Pick<UpdateProvider, "vendor" | "preset_key"> | null) {
+  const vendor = value?.vendor?.trim().toLowerCase();
+  const preset = value?.preset_key?.trim().toLowerCase();
+  return vendor === "vertexai" || preset === "vertexai";
+}
+
+function defaultVertexBaseUrl(protocol: ProviderProtocol | string) {
+  const base = "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global";
+  return protocol === "openai-compat" ? `${base}/endpoints/openapi` : base;
+}
+
 function joinStaticModels(models?: string[]) {
   return models?.join("\n") ?? "";
 }
@@ -1110,16 +1121,21 @@ export default function ProvidersPage() {
     );
     const config = resolvePresetConfig(selectedPreset, nextProtocol, nextChannelId);
     const nextBaseUrl = config.baseUrl || protocolUrl(nextProtocol);
-    setForm((prev) => ({
-      ...prev,
-      channel: nextChannelId,
-      protocol: nextProtocol,
-      auth_mode: presetChannelAuthMode(selectedPreset, nextChannelId),
-      base_url: nextBaseUrl,
-      models_source: config.modelsSource,
-      static_models: config.staticModels,
-      api_key: config.apiKey || prev.api_key,
-    }));
+    setForm((prev) => {
+      const baseUrl = isVertexProviderSelection(prev)
+        ? (nextBaseUrl || defaultVertexBaseUrl(nextProtocol))
+        : nextBaseUrl;
+      return {
+        ...prev,
+        channel: nextChannelId,
+        protocol: nextProtocol,
+        auth_mode: presetChannelAuthMode(selectedPreset, nextChannelId),
+        base_url: baseUrl,
+        models_source: config.modelsSource,
+        static_models: config.staticModels,
+        api_key: config.apiKey || prev.api_key,
+      };
+    });
   }
 
   function handleEditPresetChange(nextPresetId: string) {
@@ -1149,13 +1165,16 @@ export default function ProvidersPage() {
             );
             const config = resolvePresetConfig(preset, nextProtocol, nextChannelId);
             const nextBaseUrl = config.baseUrl || protocolUrl(nextProtocol);
+            const baseUrl = isVertexProviderSelection(prev)
+              ? (nextBaseUrl || defaultVertexBaseUrl(nextProtocol))
+              : nextBaseUrl;
             return {
               ...prev,
               vendor: preset.id === DEFAULT_PRESET_ID ? undefined : preset.id,
               preset_key: preset.id,
               channel: nextChannelId,
               protocol: nextProtocol,
-              base_url: nextBaseUrl,
+              base_url: baseUrl,
               models_source: config.modelsSource,
               static_models: config.staticModels,
               api_key: config.apiKey || prev.api_key,
@@ -1185,6 +1204,7 @@ export default function ProvidersPage() {
   );
   const hasCreatePresets = providerPresets.length > 0;
   const createResolvedAuthMode = presetChannelAuthMode(selectedPreset, createChannelValue);
+  const createUsesVertexServiceAccount = isVertexProviderSelection(form);
   const createOAuthReady = createOAuthStatus?.status === "ready";
   const createOAuthRequiresManualCode =
     createOAuthStatus?.status === "pending"
@@ -1552,25 +1572,46 @@ export default function ProvidersPage() {
                 />
               </div>
               {createResolvedAuthMode !== "oauth" && (
-                <div className="space-y-2">
-                  <FieldLabel>API Key</FieldLabel>
-                  <div className="relative">
-                    <Input
-                      placeholder="sk-..."
-                      type={showCreateApiKey ? "text" : "password"}
+                <div className={createUsesVertexServiceAccount ? "col-span-2 space-y-2" : "space-y-2"}>
+                  <FieldLabel
+                    info={
+                      createUsesVertexServiceAccount
+                        ? (isZh ? "粘贴 Google Cloud 服务账号 JSON，需包含 project_id、client_email、private_key。" : "Paste the Google Cloud service account JSON with project_id, client_email, and private_key.")
+                        : undefined
+                    }
+                  >
+                    {createUsesVertexServiceAccount ? (isZh ? "服务账号 JSON" : "Service Account JSON") : "API Key"}
+                  </FieldLabel>
+                  {createUsesVertexServiceAccount ? (
+                    <textarea
+                      placeholder={isZh ? "{\n  \"project_id\": \"...\",\n  \"client_email\": \"...\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\n...\"\n}" : "{\n  \"project_id\": \"...\",\n  \"client_email\": \"...\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\n...\"\n}"}
                       value={form.api_key}
-                      className="pr-10"
+                      rows={8}
+                      className="min-h-32 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-slate-300"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                     />
-                    <button
-                      type="button"
-                      onClick={() => setShowCreateApiKey((prev) => !prev)}
-                      className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                      aria-label={showCreateApiKey ? (isZh ? "隐藏 API Key" : "Hide API key") : (isZh ? "显示 API Key" : "Show API key")}
-                    >
-                      {showCreateApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                  </div>
+                  ) : (
+                    <div className="relative">
+                      <Input
+                        placeholder="sk-..."
+                        type={showCreateApiKey ? "text" : "password"}
+                        value={form.api_key}
+                        className="pr-10"
+                        onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowCreateApiKey((prev) => !prev)}
+                        className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        aria-label={showCreateApiKey ? (isZh ? "隐藏 API Key" : "Hide API key") : (isZh ? "显示 API Key" : "Show API key")}
+                      >
+                        {showCreateApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               {createResolvedAuthMode !== "oauth" && (
@@ -1591,10 +1632,13 @@ export default function ProvidersPage() {
                       selectedPreset && selectedPreset.id !== DEFAULT_PRESET_ID
                         ? (config.baseUrl || form.base_url)
                         : config.baseUrl;
+                    const baseUrl = createUsesVertexServiceAccount
+                      ? (nextBaseUrl || defaultVertexBaseUrl(nextProtocol))
+                      : nextBaseUrl;
                     setForm({
                       ...form,
                       protocol: nextProtocol,
-                      base_url: nextBaseUrl,
+                      base_url: baseUrl,
                       models_source: form.models_source,
                       static_models: config.staticModels,
                     });
@@ -1739,6 +1783,7 @@ export default function ProvidersPage() {
                 availableProtocolsForPreset(editingPreset, editingChannelValue).includes(option.value),
               );
               const editingResolvedAuthMode = presetChannelAuthMode(editingPreset, editingChannelValue);
+              const editUsesVertexServiceAccount = isVertexProviderSelection(editForm);
               const currentProviderIsOAuth =
                 normalizeAuthMode(p.auth_mode) === "oauth"
                 || normalizeAuthMode(editForm.auth_mode) === "oauth";
@@ -1833,12 +1878,16 @@ export default function ProvidersPage() {
                             resolvedProtocol,
                             value,
                           );
+                          const nextBaseUrl = config.baseUrl || protocolUrl(resolvedProtocol);
+                          const baseUrl = editUsesVertexServiceAccount
+                            ? (nextBaseUrl || defaultVertexBaseUrl(resolvedProtocol))
+                            : nextBaseUrl;
                           setEditError(null);
                           setEditForm({
                             ...editForm,
                             channel: value,
                             protocol: resolvedProtocol,
-                            base_url: config.baseUrl || protocolUrl(resolvedProtocol),
+                            base_url: baseUrl,
                             models_source: config.modelsSource,
                             static_models: config.staticModels,
                           });
@@ -2049,25 +2098,46 @@ export default function ProvidersPage() {
                       />
                     </div>
                     {editingResolvedAuthMode !== "oauth" ? (
-                      <div className="space-y-2">
-                        <FieldLabel>{isZh ? "API Key" : "API Key"}</FieldLabel>
-                        <div className="relative">
-                          <Input
-                            placeholder="sk-..."
-                            type={showEditApiKey ? "text" : "password"}
+                      <div className={editUsesVertexServiceAccount ? "col-span-2 space-y-2" : "space-y-2"}>
+                        <FieldLabel
+                          info={
+                            editUsesVertexServiceAccount
+                              ? (isZh ? "粘贴 Google Cloud 服务账号 JSON，需包含 project_id、client_email、private_key。" : "Paste the Google Cloud service account JSON with project_id, client_email, and private_key.")
+                              : undefined
+                          }
+                        >
+                          {editUsesVertexServiceAccount ? (isZh ? "服务账号 JSON" : "Service Account JSON") : (isZh ? "API Key" : "API Key")}
+                        </FieldLabel>
+                        {editUsesVertexServiceAccount ? (
+                          <textarea
+                            placeholder={isZh ? "{\n  \"project_id\": \"...\",\n  \"client_email\": \"...\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\n...\"\n}" : "{\n  \"project_id\": \"...\",\n  \"client_email\": \"...\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\n...\"\n}"}
                             value={editForm.api_key ?? ""}
-                            className="pr-10"
+                            rows={8}
+                            className="min-h-32 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-slate-300"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
                             onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })}
                           />
-                          <button
-                            type="button"
-                            onClick={() => setShowEditApiKey((prev) => !prev)}
-                            className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                            aria-label={showEditApiKey ? (isZh ? "隐藏 API Key" : "Hide API key") : (isZh ? "显示 API Key" : "Show API key")}
-                          >
-                            {showEditApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                          </button>
-                        </div>
+                        ) : (
+                          <div className="relative">
+                            <Input
+                              placeholder="sk-..."
+                              type={showEditApiKey ? "text" : "password"}
+                              value={editForm.api_key ?? ""}
+                              className="pr-10"
+                              onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowEditApiKey((prev) => !prev)}
+                              className="absolute top-1/2 right-3 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                              aria-label={showEditApiKey ? (isZh ? "隐藏 API Key" : "Hide API key") : (isZh ? "显示 API Key" : "Show API key")}
+                            >
+                              {showEditApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : null}
                     {editingResolvedAuthMode !== "oauth" ? (
@@ -2088,10 +2158,13 @@ export default function ProvidersPage() {
                             editingPreset && editingPreset.id !== DEFAULT_PRESET_ID
                               ? (config.baseUrl || editForm.base_url || "")
                               : config.baseUrl;
+                          const baseUrl = editUsesVertexServiceAccount
+                            ? (nextBaseUrl || defaultVertexBaseUrl(nextProtocol))
+                            : nextBaseUrl;
                           setEditForm({
                             ...editForm,
                             protocol: nextProtocol,
-                            base_url: nextBaseUrl,
+                            base_url: baseUrl,
                             models_source: editForm.models_source,
                             static_models: config.staticModels,
                           });

@@ -226,6 +226,7 @@ impl VendorRegistry {
             "openai",
             "anthropic",
             "google",
+            "vertexai",
             "xai",
             "deepseek",
             "moonshotai",

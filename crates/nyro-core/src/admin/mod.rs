@@ -20,7 +20,7 @@ use crate::protocol::ProviderProtocols;
 use crate::protocol::ids::OPENAI_CHAT_COMPLETIONS_V1;
 use crate::protocol::ids::OPENAI_EMBEDDINGS_V1;
 use crate::provider::metadata::CapabilitiesSource;
-use crate::provider::{VendorCtx, VendorRegistry};
+use crate::provider::{VendorCtx, VendorRegistry, vertexai};
 use crate::proxy::client::ProxyClient;
 use crate::router::TargetSelector;
 use crate::storage::traits::ProviderTestResult;
@@ -655,7 +655,17 @@ impl AdminService {
             .await;
         let start = Instant::now();
         let protocol = provider.protocol.trim();
-        let base_url = provider.base_url.trim();
+        let vertex_runtime = if vertexai::is_vertex_vendor(&provider) {
+            Some(self.resolve_provider_runtime(&provider).await?)
+        } else {
+            None
+        };
+        let base_url_owned = vertex_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.binding.base_url_override.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| provider.base_url.clone());
+        let base_url = base_url_owned.trim();
 
         let result = if base_url.is_empty() {
             TestResult {
@@ -668,15 +678,25 @@ impl AdminService {
             let mut failures: Vec<String> = Vec::new();
             if reqwest::Url::parse(base_url).is_err() {
                 failures.push(format!("{protocol}: Base URL format is invalid"));
-            } else if let Err(e) = self
-                .gw
-                .http_client
-                .get(base_url)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-                failures.push(format!("{protocol}: {}", format_connectivity_error(&e)));
+            } else {
+                let mut request = self
+                    .gw
+                    .http_client
+                    .get(base_url)
+                    .timeout(Duration::from_secs(10));
+                if let Some(runtime) = &vertex_runtime {
+                    let mut headers = runtime_binding_headers(&runtime.binding)?;
+                    if !runtime.binding.disable_default_auth {
+                        headers.insert(
+                            AUTHORIZATION,
+                            HeaderValue::from_str(&format!("Bearer {}", runtime.access_token))?,
+                        );
+                    }
+                    request = request.headers(headers);
+                }
+                if let Err(e) = request.send().await {
+                    failures.push(format!("{protocol}: {}", format_connectivity_error(&e)));
+                }
             }
 
             if failures.is_empty() {
@@ -903,7 +923,17 @@ impl AdminService {
                 Some(provider) if provider.is_enabled => provider,
                 _ => continue,
             };
-            let Some(openai_base_url) = resolve_openai_base_url(&provider) else {
+            let runtime = match self.resolve_provider_runtime(&provider).await {
+                Ok(runtime) => runtime,
+                Err(_) => continue,
+            };
+            let Some(openai_base_url) = runtime
+                .binding
+                .base_url_override
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| resolve_openai_base_url(&provider))
+            else {
                 missing_openai_endpoint = true;
                 continue;
             };
@@ -916,10 +946,6 @@ impl AdminService {
             {
                 Some(ext) => ext.clone(),
                 None => continue,
-            };
-            let runtime = match self.resolve_provider_runtime(&provider).await {
-                Ok(runtime) => runtime,
-                Err(_) => continue,
             };
             let credential = runtime.access_token.clone();
             let upstream_url;
@@ -1731,6 +1757,20 @@ impl AdminService {
             let api_key = provider.api_key.trim().to_string();
             if api_key.is_empty() {
                 anyhow::bail!("provider api key is empty");
+            }
+            if vertexai::is_vertex_vendor(provider) {
+                let access_token = vertexai::vertex_access_token(&api_key).await?;
+                let binding = RuntimeBinding {
+                    base_url_override: Some(vertexai::expand_vertex_base_url(
+                        &provider.base_url,
+                        &api_key,
+                    )),
+                    ..RuntimeBinding::default()
+                };
+                return Ok(ResolvedProviderRuntime {
+                    access_token,
+                    binding,
+                });
             }
             return Ok(ResolvedProviderRuntime {
                 access_token: api_key,

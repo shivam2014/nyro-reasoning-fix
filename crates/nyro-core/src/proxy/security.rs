@@ -232,7 +232,7 @@ pub async fn check_route_access(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Extract the bearer token or x-api-key header value.
+/// Extract the client API key from supported ingress authentication headers.
 pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
@@ -245,12 +245,18 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
+    for header_name in ["x-api-key", "x-goog-api-key"] {
+        if let Some(key) = headers
+            .get(header_name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return Some(key.to_string());
+        }
+    }
+
+    None
 }
 
 pub(crate) fn is_key_expired(expires_at: &str) -> bool {
@@ -271,4 +277,38 @@ pub async fn get_provider(
         .get_active_provider(id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("provider not found or inactive: {id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::extract_api_key;
+
+    #[test]
+    fn extract_api_key_accepts_bearer_and_trims_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer   sk-openai"),
+        );
+
+        assert_eq!(extract_api_key(&headers).as_deref(), Some("sk-openai"));
+    }
+
+    #[test]
+    fn extract_api_key_accepts_anthropic_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static(" sk-anthropic "));
+
+        assert_eq!(extract_api_key(&headers).as_deref(), Some("sk-anthropic"));
+    }
+
+    #[test]
+    fn extract_api_key_accepts_google_genai_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-api-key", HeaderValue::from_static(" sk-google "));
+
+        assert_eq!(extract_api_key(&headers).as_deref(), Some("sk-google"));
+    }
 }

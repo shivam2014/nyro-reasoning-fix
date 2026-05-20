@@ -1092,6 +1092,7 @@ fn replay_cached_stream(
 
 fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStreamDelta> {
     use crate::protocol::ir::AiStreamDelta;
+    use crate::protocol::ir::response::ResponseItem;
     let mut deltas = vec![AiStreamDelta::MessageStart {
         id: if resp.id.is_empty() {
             format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
@@ -1108,21 +1109,66 @@ fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStream
             deltas.push(AiStreamDelta::ThinkingSignature(sig.clone()));
         }
     }
-    if !resp.content.is_empty() {
-        deltas.push(AiStreamDelta::TextDelta(resp.content.clone()));
-    }
-    for (index, tool_call) in resp.tool_calls.iter().enumerate() {
-        deltas.push(AiStreamDelta::ToolCallStart {
-            index,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-        });
-        if !tool_call.arguments.is_empty() {
-            deltas.push(AiStreamDelta::ToolCallDelta {
-                index,
-                arguments: tool_call.arguments.clone(),
-            });
+
+    if let Some(items) = &resp.items {
+        let mut tool_index = 0;
+        for item in items {
+            match item {
+                ResponseItem::OutputText { text } if !text.is_empty() => {
+                    deltas.push(AiStreamDelta::TextDelta(text.clone()));
+                }
+                ResponseItem::Thinking { text } if !text.is_empty() => {
+                    deltas.push(AiStreamDelta::ThinkingDelta(text.clone()));
+                }
+                ResponseItem::FunctionCall {
+                    call_id,
+                    name,
+                    arguments,
+                } => {
+                    deltas.push(AiStreamDelta::ToolCallStart {
+                        index: tool_index,
+                        id: call_id.clone(),
+                        name: name.clone(),
+                    });
+                    if !arguments.is_empty() {
+                        deltas.push(AiStreamDelta::ToolCallDelta {
+                            index: tool_index,
+                            arguments: arguments.clone(),
+                        });
+                    }
+                    tool_index += 1;
+                }
+                ResponseItem::Unknown { raw } => {
+                    deltas.push(AiStreamDelta::Unknown {
+                        raw: raw.to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
+    } else {
+        if !resp.content.is_empty() {
+            deltas.push(AiStreamDelta::TextDelta(resp.content.clone()));
+        }
+        for (index, tool_call) in resp.tool_calls.iter().enumerate() {
+            deltas.push(AiStreamDelta::ToolCallStart {
+                index,
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+            });
+            if !tool_call.arguments.is_empty() {
+                deltas.push(AiStreamDelta::ToolCallDelta {
+                    index,
+                    arguments: tool_call.arguments.clone(),
+                });
+            }
+        }
+    }
+
+    if let Some(metadata) = resp.vendor.ingress.get("__google_response_metadata") {
+        deltas.push(AiStreamDelta::Unknown {
+            raw: serde_json::json!({"__google_response_metadata": metadata}).to_string(),
+        });
     }
     deltas.push(AiStreamDelta::Usage(resp.usage.clone()));
     deltas.push(AiStreamDelta::Done {
@@ -1379,5 +1425,73 @@ fn resolve_openai_base_url(provider: &Provider) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ai_response_to_deltas;
+    use crate::protocol::StreamResponseEncoder;
+    use crate::protocol::codec::google_generative::stream::GoogleStreamFormatter;
+    use crate::protocol::ir::response::ResponseItem;
+    use crate::protocol::ir::{AiResponse, Usage};
+    use serde_json::Value;
+
+    #[test]
+    fn cached_non_stream_gemini_response_replays_inline_data_as_stream() {
+        let mut resp = AiResponse::new("cached-image", "gemini-3.1-flash-image-preview");
+        resp.items = Some(vec![ResponseItem::Unknown {
+            raw: serde_json::json!({
+                "inlineData": {
+                    "mimeType": "image/png",
+                    "data": "iVBORw0KGgoAAAANSUhEUgA"
+                }
+            }),
+        }]);
+        resp.stop_reason = Some("stop".to_string());
+        resp.usage = Usage {
+            prompt_tokens: 24,
+            completion_tokens: 1120,
+            ..Usage::default()
+        };
+        resp.vendor.ingress.insert(
+            "__google_response_metadata".to_string(),
+            serde_json::json!({
+                "responseId": "cached-image",
+                "modelVersion": "gemini-3.1-flash-image-preview",
+                "usageMetadata": {
+                    "promptTokenCount": 24,
+                    "candidatesTokenCount": 1120,
+                    "totalTokenCount": 1144,
+                    "trafficType": "ON_DEMAND"
+                }
+            }),
+        );
+
+        let deltas = ai_response_to_deltas(&resp);
+        let mut formatter = GoogleStreamFormatter::new();
+        let events = formatter.format_deltas(&deltas);
+
+        let image_event = events
+            .iter()
+            .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+            .find(|value| {
+                value["candidates"][0]["content"]["parts"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part.get("inlineData").is_some()))
+            })
+            .expect("cached stream replay should contain inlineData");
+        assert_eq!(
+            image_event["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            "iVBORw0KGgoAAAANSUhEUgA"
+        );
+
+        let usage_event = events
+            .iter()
+            .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+            .find(|value| value.get("usageMetadata").is_some())
+            .expect("cached stream replay should contain terminal usage");
+        assert_eq!(usage_event["usageMetadata"]["trafficType"], "ON_DEMAND");
+        assert_eq!(usage_event["responseId"], "cached-image");
     }
 }

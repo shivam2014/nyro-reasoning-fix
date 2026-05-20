@@ -86,6 +86,81 @@ fn resolve_falls_back_to_vendor_when_channel_unknown() {
 }
 
 #[test]
+fn vertex_vendor_is_registered_with_native_and_openai_channels() {
+    let reg = VendorRegistry::global();
+    let meta = reg.metadata("vertexai").expect("vertex metadata");
+    assert_eq!(meta.default_protocol, "google-genai");
+    assert!(
+        meta.channels
+            .iter()
+            .any(|c| c.base_urls.iter().any(|b| b.protocol == "google-genai")),
+        "vertex must expose native google-genai endpoint"
+    );
+    assert!(
+        meta.channels
+            .iter()
+            .any(|c| c.base_urls.iter().any(|b| b.protocol == "openai-compat")),
+        "vertex must expose OpenAI-compatible endpoint"
+    );
+}
+
+#[test]
+fn vertex_build_url_rewrites_google_generate_content_to_vertex_resource() {
+    let reg = VendorRegistry::global();
+    let mut p = make_provider(Some("vertexai"), None);
+    p.protocol = "google-genai".into();
+    p.base_url = "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global".into();
+    p.api_key = r#"{"project_id":"demo-project"}"#.into();
+    let ext = reg
+        .resolve(&p, GOOGLE_GENERATE_CONTENT_V1BETA)
+        .expect("vertex vendor ext");
+    let ctx = ctx(
+        &p,
+        GOOGLE_GENERATE_CONTENT_V1BETA,
+        &p.api_key,
+        "gemini-2.5-flash",
+        None,
+    );
+
+    let url = ext.build_url(
+        &ctx,
+        &p.base_url,
+        "/v1beta/models/gemini-2.5-flash:generateContent",
+    );
+
+    assert_eq!(
+        url,
+        "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
+    );
+}
+
+#[test]
+fn vertex_build_url_rewrites_openai_compat_path_without_double_version() {
+    let reg = VendorRegistry::global();
+    let mut p = make_provider(Some("vertexai"), None);
+    p.protocol = "openai-compat".into();
+    p.base_url = "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/endpoints/openapi".into();
+    p.api_key = r#"{"project_id":"demo-project"}"#.into();
+    let ext = reg
+        .resolve(&p, OPENAI_CHAT_COMPLETIONS_V1)
+        .expect("vertex vendor ext");
+    let ctx = ctx(
+        &p,
+        OPENAI_CHAT_COMPLETIONS_V1,
+        &p.api_key,
+        "google/gemini-2.5-flash",
+        None,
+    );
+
+    let url = ext.build_url(&ctx, &p.base_url, "/v1/chat/completions");
+
+    assert_eq!(
+        url,
+        "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/endpoints/openapi/chat/completions"
+    );
+}
+
+#[test]
 fn resolve_falls_back_to_protocol_default_vendor_when_vendor_unknown() {
     let reg = VendorRegistry::global();
     let p = make_provider(Some("unmapped-vendor"), None);

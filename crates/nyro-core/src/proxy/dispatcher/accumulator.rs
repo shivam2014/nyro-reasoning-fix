@@ -2,6 +2,7 @@
 //! `AiResponse` for caching and formatted response aggregation.
 
 use crate::protocol::ir::request::ToolCall;
+use crate::protocol::ir::response::ResponseItem;
 use crate::protocol::ir::{AiResponse, AiStreamDelta, Usage};
 
 #[derive(Default)]
@@ -12,6 +13,7 @@ pub(super) struct StreamResponseAccumulator {
     pub(super) reasoning_content: String,
     pub(super) reasoning_signature: String,
     pub(super) tool_calls: Vec<Option<ToolCall>>,
+    pub(super) unknown_items: Vec<ResponseItem>,
     pub(super) stop_reason: Option<String>,
     pub(super) usage: Usage,
 }
@@ -71,7 +73,11 @@ impl StreamResponseAccumulator {
                     self.stop_reason = Some("error".to_string());
                 }
             }
-            AiStreamDelta::Unknown { .. } => {}
+            AiStreamDelta::Unknown { raw } => {
+                if let Ok(raw) = serde_json::from_str(raw) {
+                    self.unknown_items.push(ResponseItem::Unknown { raw });
+                }
+            }
         }
     }
 
@@ -95,6 +101,16 @@ impl StreamResponseAccumulator {
             Some(self.reasoning_signature)
         };
         resp.tool_calls = tool_calls;
+        if !self.unknown_items.is_empty() {
+            let mut items = Vec::new();
+            if !resp.content.is_empty() {
+                items.push(ResponseItem::OutputText {
+                    text: resp.content.clone(),
+                });
+            }
+            items.extend(self.unknown_items);
+            resp.items = Some(items);
+        }
         resp.stop_reason = self.stop_reason;
         resp.usage = self.usage;
         resp

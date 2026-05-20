@@ -39,6 +39,7 @@ dashmap = "6"
 inventory = "0.3"
 arc-swap = "1"
 keyring = "3"
+gcp_auth = "0.12.6"
 
 [dev-dependencies]
 tempfile = "3"
