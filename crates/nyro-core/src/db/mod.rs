@@ -71,6 +71,19 @@ pub async fn migrate(pool: &SqlitePool, vector_dimensions: usize) -> anyhow::Res
     ensure_request_log_column(pool, "request_body", "TEXT").await?;
     ensure_request_log_column(pool, "response_headers", "TEXT").await?;
     ensure_request_log_column(pool, "response_body", "TEXT").await?;
+    // ── Renamed-column reconciliation (upstream PR-01~17 refactor) ───────────
+    // The v1.6.x refactor renamed client_protocol→ingress_protocol,
+    // upstream_protocol→egress_protocol, client_model→request_model,
+    // upstream_model→actual_model, client_status_code→status_code,
+    // latency_total_ms→duration_ms in the new INIT_SQL but never added ALTER
+    // TABLE migrations.  Existing databases keep the old column names and the
+    // append_batch INSERT silently fails, dropping all logs.
+    ensure_request_log_column(pool, "ingress_protocol", "TEXT").await?;
+    ensure_request_log_column(pool, "egress_protocol", "TEXT").await?;
+    ensure_request_log_column(pool, "request_model", "TEXT").await?;
+    ensure_request_log_column(pool, "actual_model", "TEXT").await?;
+    ensure_request_log_column(pool, "status_code", "INTEGER").await?;
+    ensure_request_log_column(pool, "duration_ms", "REAL").await?;
     ensure_api_key_tables(pool).await?;
     ensure_api_key_column(pool, "rpd", "INTEGER").await?;
     // Migrate: providers/routes is_active -> is_enabled

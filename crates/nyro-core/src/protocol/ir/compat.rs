@@ -8,6 +8,8 @@
 //! Round-trip property: `InternalRequest → AiRequest → InternalRequest` is
 //! lossless for all fields present in `InternalRequest`.
 
+use std::collections::HashMap;
+
 use crate::protocol::ir::request::{
     AiRequest, ContentBlock, GenerationConfig, Message, MessageContent, Role,
     StreamConfig, ToolCall, ToolSpec,
@@ -130,6 +132,7 @@ fn msg_to_old(msg: Message) -> InternalMessage {
         content: content_to_old(msg.content),
         tool_calls: msg.tool_calls.map(|tcs| tcs.into_iter().map(tc_to_old).collect()),
         tool_call_id: msg.tool_call_id,
+        extra: HashMap::new(),
     }
 }
 
@@ -211,6 +214,7 @@ mod tests {
                 content: OldMessageContent::Text("hello".into()),
                 tool_calls: None,
                 tool_call_id: None,
+                extra: HashMap::new(),
             }],
             model: "gpt-4o".to_string(),
             stream: true,
