@@ -112,6 +112,8 @@ fn should_forward_client_header(name: &str) -> bool {
             | "upgrade"
             | "host"
             | "content-length"
+            | "accept-encoding"
+            | "content-encoding"
             // Client network identity / local origin metadata.
             | "forwarded"
             | "x-forwarded-for"
@@ -190,5 +192,18 @@ mod tests {
         assert!(forwarded.get("remote-host").is_none());
         assert!(forwarded.get("connection").is_none());
         assert_eq!(forwarded.get("anthropic-beta").unwrap(), "prompt-caching");
+    }
+
+    #[test]
+    fn forwarded_client_headers_drop_client_encoding_negotiation() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
+
+        let forwarded = forwarded_client_headers(&headers);
+
+        assert!(
+            forwarded.get("accept-encoding").is_none(),
+            "reqwest must own upstream response decompression; client encoding hints are only for the Nyro response"
+        );
     }
 }

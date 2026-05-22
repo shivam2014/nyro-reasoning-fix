@@ -149,11 +149,15 @@ where
 /// Used when [`crate::proxy::planner::ProtocolMode::Native`] is in effect
 /// (ingress == egress) and the vendor declares no request mutations via
 /// [`Vendor::declared_request_mutations`]. Only auth headers and the egress
-/// URL are computed; the client body is forwarded verbatim.
+/// URL are computed; the client body is forwarded verbatim. `is_stream` must
+/// come from the decoded ingress request, not just a raw body field: native
+/// Gemini expresses streaming in the URL action (`:streamGenerateContent`)
+/// rather than a JSON `stream` property.
 pub async fn passthrough_run(
     vendor: &dyn Vendor,
     mut raw_body: serde_json::Value,
     ctx: &crate::provider::vendor::ProviderCtx<'_>,
+    is_stream: bool,
 ) -> Result<crate::provider::outbound::OutboundRequest, GatewayError> {
     // Replace the model field with the route-configured actual model so the
     // upstream receives the real model name, not the client's virtual alias.
@@ -183,10 +187,6 @@ pub async fn passthrough_run(
         }
     }
 
-    let is_stream = raw_body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let egress_path = ctx
         .protocol
         .handler()
@@ -216,7 +216,8 @@ mod tests {
     use crate::db::models::Provider;
     use crate::error::GatewayError;
     use crate::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId,
+        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId,
     };
     use crate::protocol::ir::{AiRequest, AiResponse};
     use crate::provider::inbound::InboundResponse;
@@ -479,6 +480,37 @@ mod tests {
         assert!(
             out.headers.get(reqwest::header::AUTHORIZATION).is_none(),
             "Authorization must be removed once x-api-key is set",
+        );
+    }
+
+    #[tokio::test]
+    async fn passthrough_native_gemini_stream_uses_stream_generate_content_path() {
+        let gw = build_test_gateway().await;
+        let provider = provider_with_api_key("gemini-key");
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            egress_base_url: "https://gemini-proxy.local",
+            api_key: &provider.api_key,
+            actual_model: "gemini-2.5-flash",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: false,
+        };
+
+        let out = passthrough_run(
+            &FakeApiKeyVendor,
+            serde_json::json!({ "contents": [{ "parts": [{ "text": "ping" }] }] }),
+            &ctx,
+            true,
+        )
+        .await
+        .expect("passthrough succeeds");
+
+        assert_eq!(
+            out.url,
+            "https://gemini-proxy.local/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            "Gemini stream passthrough selects streaming from the URL action, not a body stream flag",
         );
     }
 }

@@ -321,10 +321,14 @@ async fn passthrough_run_preserves_vendor_specific_fields() {
         disable_default_auth: false,
     };
 
-    let out =
-        nyro_core::provider::common::pipeline::passthrough_run(&vendor, raw_body.clone(), &ctx)
-            .await
-            .expect("passthrough_run must succeed");
+    let out = nyro_core::provider::common::pipeline::passthrough_run(
+        &vendor,
+        raw_body.clone(),
+        &ctx,
+        false,
+    )
+    .await
+    .expect("passthrough_run must succeed");
 
     // Vendor-specific extension fields must survive; model is replaced with
     // actual_model (same value here, so body equality still holds).
@@ -374,9 +378,10 @@ async fn passthrough_run_rewrites_model_to_actual_model() {
         disable_default_auth: false,
     };
 
-    let out = nyro_core::provider::common::pipeline::passthrough_run(&vendor, raw_body, &ctx)
-        .await
-        .expect("passthrough_run must succeed");
+    let out =
+        nyro_core::provider::common::pipeline::passthrough_run(&vendor, raw_body, &ctx, false)
+            .await
+            .expect("passthrough_run must succeed");
 
     assert_eq!(
         out.body["model"], "glm-4-flash",
@@ -402,10 +407,14 @@ async fn passthrough_run_sets_stream_path_for_streaming_body() {
         disable_default_auth: false,
     };
 
-    let out =
-        nyro_core::provider::common::pipeline::passthrough_run(&vendor, raw_body.clone(), &ctx)
-            .await
-            .expect("passthrough_run must succeed");
+    let out = nyro_core::provider::common::pipeline::passthrough_run(
+        &vendor,
+        raw_body.clone(),
+        &ctx,
+        true,
+    )
+    .await
+    .expect("passthrough_run must succeed");
 
     assert_eq!(out.body, raw_body);
     assert!(

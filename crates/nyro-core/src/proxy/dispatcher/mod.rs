@@ -284,8 +284,13 @@ pub async fn dispatch_pipeline(
             plan.mode == ProtocolMode::Native && !adapter.declared_response_mutations();
         let mut outbound = if passthrough_req {
             let raw = envelope.body.clone().unwrap_or_default();
-            match crate::provider::common::pipeline::passthrough_run(adapter.as_ref(), raw, &ctx)
-                .await
+            match crate::provider::common::pipeline::passthrough_run(
+                adapter.as_ref(),
+                raw,
+                &ctx,
+                is_stream,
+            )
+            .await
             {
                 Ok(o) => o,
                 Err(e) => {
