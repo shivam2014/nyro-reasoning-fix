@@ -1,8 +1,8 @@
 use axum::extract::DefaultBodyLimit;
-use axum::middleware;
-use axum::routing::{get, post};
 use axum::Router;
 use axum::http::{HeaderValue, Method, header};
+use axum::middleware;
+use axum::routing::{get, post};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -14,31 +14,39 @@ use crate::Gateway;
 pub fn create_router(gateway: Gateway) -> Router {
     let limit = gateway.config.proxy_body_limit as usize;
     let router = Router::new()
-        .route("/v1/chat/completions", post(ingress::openai_chat::openai_chat)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/chat/completions", post(ingress::openai_chat::openai_chat)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/v1/responses", post(ingress::openai_responses::openai_responses)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/responses", post(ingress::openai_responses::openai_responses)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/v1/messages", post(ingress::anthropic_messages::anthropic_messages)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/messages", post(ingress::anthropic_messages::anthropic_messages)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/v1/embeddings", post(ingress::openai_embeddings::openai_embeddings)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/embeddings", post(ingress::openai_embeddings::openai_embeddings)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/v1beta/models/:model_action", post(ingress::google_generate::google_generate)
-            .layer(DefaultBodyLimit::max(limit)))
-        .route("/models/:model_action", post(ingress::google_generate::google_generate)
-            .layer(DefaultBodyLimit::max(limit)))
+        .route(
+            "/v1/chat/completions",
+            post(ingress::openai_compatible::chat_completions::handler)
+                .layer(DefaultBodyLimit::max(limit)),
+        )
+        .route(
+            "/v1/responses",
+            post(ingress::openai_responses::responses::handler)
+                .layer(DefaultBodyLimit::max(limit)),
+        )
+        .route(
+            "/v1/messages",
+            post(ingress::anthropic_messages::messages::handler)
+                .layer(DefaultBodyLimit::max(limit)),
+        )
+        .route(
+            "/v1/embeddings",
+            post(ingress::openai_compatible::embeddings::handler)
+                .layer(DefaultBodyLimit::max(limit)),
+        )
+        .route(
+            "/v1beta/models/:model_action",
+            post(ingress::google_generative::generate_content::handler)
+                .layer(DefaultBodyLimit::max(limit)),
+        )
         .route("/v1/models", get(handler::models_list))
-        .route("/models", get(handler::models_list))
-        .route("/health", get(health));
+        .route("/health", get(health))
+        .route("/", get(health));
 
-    let cors = build_proxy_cors_layer(&gateway.config.proxy_cors_origins, gateway.config.proxy_port);
+    let cors = build_proxy_cors_layer(
+        &gateway.config.proxy_cors_origins,
+        gateway.config.proxy_port,
+    );
 
     router
         .layer(middleware::from_fn(inject_context))
@@ -67,6 +75,12 @@ fn build_proxy_cors_layer(origins: &[String], proxy_port: u16) -> CorsLayer {
             header::ACCEPT,
             header::HeaderName::from_static("x-api-key"),
             header::HeaderName::from_static("anthropic-version"),
+            header::HeaderName::from_static("anthropic-beta"),
+            header::HeaderName::from_static("openai-beta"),
+            header::HeaderName::from_static("openai-organization"),
+            header::HeaderName::from_static("openai-project"),
+            header::HeaderName::from_static("idempotency-key"),
+            header::HeaderName::from_static("x-request-id"),
         ])
 }
 

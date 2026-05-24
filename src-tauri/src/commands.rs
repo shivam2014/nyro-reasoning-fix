@@ -1,7 +1,7 @@
-use nyro_core::admin::{resolve_model_context_window, ProviderOAuthStatusData};
+use nyro_core::Gateway;
+use nyro_core::admin::{CopyProviderOptions, ProviderOAuthStatusData};
 use nyro_core::auth::{AuthExchangeInput, AuthSessionInitData, AuthSessionStatusData};
 use nyro_core::db::models::*;
-use nyro_core::Gateway;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
@@ -18,11 +18,16 @@ pub async fn get_providers(gw: State<'_, Gateway>) -> Result<Vec<Provider>, Stri
 
 #[tauri::command]
 pub async fn get_provider(gw: State<'_, Gateway>, id: String) -> Result<Provider, String> {
-    gw.admin().get_provider(&id).await.map_err(|e| e.to_string())
+    gw.admin()
+        .get_provider(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_provider_presets(gw: State<'_, Gateway>) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_provider_presets(
+    gw: State<'_, Gateway>,
+) -> Result<Vec<serde_json::Value>, String> {
     gw.admin()
         .list_provider_presets()
         .await
@@ -34,7 +39,22 @@ pub async fn create_provider(
     gw: State<'_, Gateway>,
     input: CreateProvider,
 ) -> Result<Provider, String> {
-    gw.admin().create_provider(input).await.map_err(|e| e.to_string())
+    gw.admin()
+        .create_provider(input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn copy_provider(
+    gw: State<'_, Gateway>,
+    id: String,
+    options: Option<CopyProviderOptions>,
+) -> Result<Provider, String> {
+    gw.admin()
+        .copy_provider_with_options(&id, options.unwrap_or_default())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -43,21 +63,33 @@ pub async fn update_provider(
     id: String,
     input: UpdateProvider,
 ) -> Result<Provider, String> {
-    gw.admin().update_provider(&id, input).await.map_err(|e| e.to_string())
+    gw.admin()
+        .update_provider(&id, input)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_provider(gw: State<'_, Gateway>, id: String) -> Result<(), String> {
-    gw.admin().delete_provider(&id).await.map_err(|e| e.to_string())
+    gw.admin()
+        .delete_provider(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn test_provider(gw: State<'_, Gateway>, id: String) -> Result<TestResult, String> {
-    gw.admin().test_provider(&id).await.map_err(|e| e.to_string())
+    gw.admin()
+        .test_provider(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn test_provider_models(gw: State<'_, Gateway>, id: String) -> Result<Vec<String>, String> {
+pub async fn test_provider_models(
+    gw: State<'_, Gateway>,
+    id: String,
+) -> Result<Vec<String>, String> {
     gw.admin()
         .test_provider_models(&id)
         .await
@@ -207,11 +239,11 @@ pub async fn list_routes(gw: State<'_, Gateway>) -> Result<Vec<Route>, String> {
 }
 
 #[tauri::command]
-pub async fn create_route(
-    gw: State<'_, Gateway>,
-    input: CreateRoute,
-) -> Result<Route, String> {
-    gw.admin().create_route(input).await.map_err(|e| e.to_string())
+pub async fn create_route(gw: State<'_, Gateway>, input: CreateRoute) -> Result<Route, String> {
+    gw.admin()
+        .create_route(input)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -220,12 +252,18 @@ pub async fn update_route(
     id: String,
     input: UpdateRoute,
 ) -> Result<Route, String> {
-    gw.admin().update_route(&id, input).await.map_err(|e| e.to_string())
+    gw.admin()
+        .update_route(&id, input)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_route(gw: State<'_, Gateway>, id: String) -> Result<(), String> {
-    gw.admin().delete_route(&id).await.map_err(|e| e.to_string())
+    gw.admin()
+        .delete_route(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── API Keys ──
@@ -245,7 +283,10 @@ pub async fn create_api_key(
     gw: State<'_, Gateway>,
     input: CreateApiKey,
 ) -> Result<ApiKeyWithBindings, String> {
-    gw.admin().create_api_key(input).await.map_err(|e| e.to_string())
+    gw.admin()
+        .create_api_key(input)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -254,19 +295,28 @@ pub async fn update_api_key(
     id: String,
     input: UpdateApiKey,
 ) -> Result<ApiKeyWithBindings, String> {
-    gw.admin().update_api_key(&id, input).await.map_err(|e| e.to_string())
+    gw.admin()
+        .update_api_key(&id, input)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_api_key(gw: State<'_, Gateway>, id: String) -> Result<(), String> {
-    gw.admin().delete_api_key(&id).await.map_err(|e| e.to_string())
+    gw.admin()
+        .delete_api_key(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Logs ──
 
 #[tauri::command]
 pub async fn query_logs(gw: State<'_, Gateway>, query: LogQuery) -> Result<LogPage, String> {
-    gw.admin().query_logs(query).await.map_err(|e| e.to_string())
+    gw.admin()
+        .query_logs(query)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -324,58 +374,18 @@ pub async fn get_stats_by_provider(
 
 #[tauri::command]
 pub async fn get_setting(gw: State<'_, Gateway>, key: String) -> Result<Option<String>, String> {
-    gw.admin().get_setting(&key).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_setting(
-    gw: State<'_, Gateway>,
-    key: String,
-    value: String,
-) -> Result<(), String> {
-    gw.admin().set_setting(&key, &value).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_cache_settings(gw: State<'_, Gateway>) -> Result<serde_json::Value, String> {
-    gw.admin().get_cache_settings().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn update_cache_settings(
-    gw: State<'_, Gateway>,
-    input: serde_json::Value,
-) -> Result<(), String> {
     gw.admin()
-        .update_cache_settings(input)
+        .get_setting(&key)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn detect_embedding_dimensions(
-    gw: State<'_, Gateway>,
-    embedding_route: String,
-) -> Result<u64, String> {
+pub async fn set_setting(gw: State<'_, Gateway>, key: String, value: String) -> Result<(), String> {
     gw.admin()
-        .detect_embedding_dimensions(&embedding_route)
+        .set_setting(&key, &value)
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn flush_cache(gw: State<'_, Gateway>) -> Result<(), String> {
-    gw.admin().flush_cache().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn delete_cache_key(gw: State<'_, Gateway>, key: String) -> Result<(), String> {
-    gw.admin().delete_cache_key(&key).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_cache_stats(gw: State<'_, Gateway>) -> Result<serde_json::Value, String> {
-    gw.admin().get_cache_stats().await.map_err(|e| e.to_string())
 }
 
 // ── Status ──
@@ -400,7 +410,10 @@ pub async fn import_config(
     gw: State<'_, Gateway>,
     data: ExportData,
 ) -> Result<ImportResult, String> {
-    gw.admin().import_config(data).await.map_err(|e| e.to_string())
+    gw.admin()
+        .import_config(data)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn resolve_home_dir() -> Option<PathBuf> {
@@ -443,7 +456,10 @@ fn get_gemini_settings_path(home_dir: &Path) -> PathBuf {
 }
 
 fn get_opencode_config_path(home_dir: &Path) -> PathBuf {
-    home_dir.join(".config").join("opencode").join("opencode.json")
+    home_dir
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,8 +645,12 @@ fn write_gemini_env_atomic(path: &Path, env_map: &HashMap<String, String>) -> Re
             .map_err(|e| format!("failed reading env file metadata {}: {e}", path.display()))?
             .permissions();
         perms.set_mode(0o600);
-        fs::set_permissions(path, perms)
-            .map_err(|e| format!("failed setting env file permissions {}: {e}", path.display()))?;
+        fs::set_permissions(path, perms).map_err(|e| {
+            format!(
+                "failed setting env file permissions {}: {e}",
+                path.display()
+            )
+        })?;
     }
 
     Ok(())
@@ -694,140 +714,18 @@ pub struct RouteSyncInfo {
     pub route_type: String,
 }
 
-
-/// Update a Codex config.toml string by surgically replacing only Nyro-managed
-/// lines. Preserves all non-Nyro content in-place, including section ordering,
-/// comments, and blank lines.
-///
-/// Three cases:
-/// - Nyro key exists at top level → replaced in-place
-/// - Nyro key missing → prepended before first `[section]`
-/// - `[model_providers]` section exists → content replaced
-/// - `[model_providers]` section missing → appended at end
-fn update_codex_config_toml(
-    existing: Option<&str>,
-    models_path: &str,
-    normalized_model: &str,
-    normalized_host: &str,
-) -> String {
-    // Build Nyro-managed top-level key→value pairs
-    let nyro_keys: Vec<(&str, String)> = vec![
-        ("model_catalog_json",
-         format!(r#"model_catalog_json = "{}""#, models_path)),
-        ("model_provider",
-         r#"model_provider = "nyro""#.to_string()),
-        ("model",
-         format!(r#"model = "{}""#, normalized_model)),
-        ("model_reasoning_effort",
-         r#"model_reasoning_effort = "high""#.to_string()),
-        ("disable_response_storage",
-         r#"disable_response_storage = true"#.to_string()),
-    ];
-
-    // Nyro [model_providers] section content
-    let nyro_section: Vec<String> = vec![
-        r#"[model_providers]"#.to_string(),
-        r#"[model_providers.nyro]"#.to_string(),
-        r#"name = "Nyro Gateway""#.to_string(),
-        format!(r#"base_url = "{}/v1""#, normalized_host),
-        r#"wire_api = "responses""#.to_string(),
-        r#"requires_openai_auth = true"#.to_string(),
-    ];
-
-    let mut out_lines: Vec<String> = Vec::new();
-    let mut found_keys: Vec<&str> = Vec::new();
-    let mut in_nyro_section = false;
-    let mut nyro_section_written = false;
-    let mut top_level = true; // before first `[section]` header
-
-    if let Some(existing_text) = existing {
-        for line in existing_text.lines() {
-            let trimmed = line.trim();
-            let is_header = trimmed.starts_with('[');
-
-            if is_header {
-                top_level = false;
-                if trimmed.starts_with("[model_providers]")
-                    || trimmed.starts_with("[model_providers.nyro]")
-                {
-                    in_nyro_section = true;
-                    if !nyro_section_written {
-                        out_lines.extend(nyro_section.iter().cloned());
-                        nyro_section_written = true;
-                    }
-                    continue;
-                }
-                if in_nyro_section {
-                    in_nyro_section = false;
-                }
-            }
-
-            if in_nyro_section {
-                continue;
-            }
-
-            // In top-level region: replace Nyro-managed keys in-place
-            if top_level && !is_header && !trimmed.starts_with('#') {
-                let mut replaced = false;
-                for &(key, ref new_val) in &nyro_keys {
-                    if trimmed.starts_with(&format!("{} =", key))
-                        || trimmed.starts_with(&format!("{}=", key))
-                    {
-                        out_lines.push(new_val.clone());
-                        found_keys.push(key);
-                        replaced = true;
-                        break;
-                    }
-                }
-                if replaced {
-                    continue;
-                }
-            }
-
-            out_lines.push(line.to_string());
-        }
-    }
-
-    // If input ended while still inside [model_providers] (no later section)
-    if in_nyro_section && !nyro_section_written {
-        out_lines.extend(nyro_section.iter().cloned());
-        nyro_section_written = true;
-    }
-
-    // Prepend any Nyro top-level keys missing from the existing config
-    let mut missing_keys: Vec<String> = Vec::new();
-    for &(key, ref val) in &nyro_keys {
-        if !found_keys.contains(&key) {
-            missing_keys.push(val.clone());
-        }
-    }
-    if !missing_keys.is_empty() {
-        missing_keys.push(String::new());
-        missing_keys.extend(out_lines);
-        out_lines = missing_keys;
-    }
-
-    // Append [model_providers] section if it didn't exist at all
-    if !nyro_section_written {
-        out_lines.push(String::new());
-        out_lines.extend(nyro_section.iter().cloned());
-    }
-
-    out_lines.join("\n")
-}
-
 #[tauri::command]
 pub async fn sync_cli_config(
-    gw: State<'_, Gateway>,
     app: tauri::AppHandle,
     tool_id: String,
     host: String,
     api_key: String,
     model: String,
-    _capabilities: Option<CliModelCapabilities>,
     routes: Vec<RouteSyncInfo>,
+    _capabilities: Option<CliModelCapabilities>,
 ) -> Result<Vec<String>, String> {
-    let home_dir = resolve_home_dir().ok_or_else(|| "failed to resolve home directory".to_string())?;
+    let home_dir =
+        resolve_home_dir().ok_or_else(|| "failed to resolve home directory".to_string())?;
     let normalized_host = host.trim().trim_end_matches('/').to_string();
     let normalized_model = model.trim().to_string();
     if normalized_host.is_empty() {
@@ -948,11 +846,6 @@ pub async fn sync_cli_config(
             let mut model_entries = Vec::new();
             for route in &routes {
                 if !route.is_enabled { continue; }
-                let route_context_window = resolve_model_context_window(
-                    &gw.config.data_dir,
-                    &route.target_provider,
-                    &route.target_model,
-                );
                 model_entries.push(serde_json::json!({
                     "slug": route.virtual_model,
                     "display_name": route.name,
@@ -964,8 +857,8 @@ pub async fn sync_cli_config(
                         {"effort": "medium", "description": "Balances speed and reasoning depth"},
                         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
                     ],
-                    "context_window": route_context_window,
-                    "max_context_window": route_context_window,
+                    "context_window": 128000,
+                    "max_context_window": 128000,
                     "effective_context_window_percent": 95,
                     "supports_parallel_tool_calls": true,
                     "supports_search_tool": false,
@@ -992,7 +885,7 @@ pub async fn sync_cli_config(
             let catalog = serde_json::json!({"models": model_entries});
             write_json_file(&models_path, &catalog)?;
 
-            // ── Update config.toml: replace only Nyro-managed lines, leave rest untouched ──
+            // Write config.toml with model_catalog_json, preserving non-Nyro sections
             let models_path_str = models_path.to_string_lossy().to_string();
             let config_toml = update_codex_config_toml(
                 config_path.exists().then(|| {
@@ -1091,6 +984,258 @@ pub async fn sync_cli_config(
     }
 }
 
+/// Update a Codex config.toml string by surgically replacing only Nyro-managed
+/// lines. Preserves all non-Nyro content in-place, including section ordering,
+/// comments, and blank lines.
+fn update_codex_config_toml(
+    existing: Option<&str>,
+    models_path: &str,
+    normalized_model: &str,
+    normalized_host: &str,
+) -> String {
+    let nyro_keys: Vec<(&str, String)> = vec![
+        ("model_catalog_json",
+         format!(r#"model_catalog_json = "{}""#, models_path)),
+        ("model_provider",
+         r#"model_provider = "nyro""#.to_string()),
+        ("model",
+         format!(r#"model = "{}""#, normalized_model)),
+        ("model_reasoning_effort",
+         r#"model_reasoning_effort = "high""#.to_string()),
+        ("disable_response_storage",
+         r#"disable_response_storage = true"#.to_string()),
+    ];
+
+    let nyro_section: Vec<String> = vec![
+        r#"[model_providers]"#.to_string(),
+        r#"[model_providers.nyro]"#.to_string(),
+        r#"name = "Nyro Gateway""#.to_string(),
+        format!(r#"base_url = "{}/v1""#, normalized_host),
+        r#"wire_api = "responses""#.to_string(),
+        r#"requires_openai_auth = true"#.to_string(),
+    ];
+
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut found_keys: Vec<&str> = Vec::new();
+    let mut in_nyro_section = false;
+    let mut nyro_section_written = false;
+    let mut top_level = true;
+
+    if let Some(existing_text) = existing {
+        for line in existing_text.lines() {
+            let trimmed = line.trim();
+            let is_header = trimmed.starts_with('[');
+
+            if is_header {
+                top_level = false;
+                if trimmed.starts_with("[model_providers]")
+                    || trimmed.starts_with("[model_providers.nyro]")
+                {
+                    in_nyro_section = true;
+                    if !nyro_section_written {
+                        out_lines.extend(nyro_section.iter().cloned());
+                        nyro_section_written = true;
+                    }
+                    continue;
+                }
+                if in_nyro_section {
+                    in_nyro_section = false;
+                }
+            }
+
+            if in_nyro_section {
+                continue;
+            }
+
+            if top_level && !is_header && !trimmed.starts_with('#') {
+                let mut replaced = false;
+                for &(key, ref new_val) in &nyro_keys {
+                    if trimmed.starts_with(&format!("{} =", key))
+                        || trimmed.starts_with(&format!("{}=", key))
+                    {
+                        out_lines.push(new_val.clone());
+                        found_keys.push(key);
+                        replaced = true;
+                        break;
+                    }
+                }
+                if replaced {
+                    continue;
+                }
+            }
+
+            out_lines.push(line.to_string());
+        }
+    }
+
+    if in_nyro_section && !nyro_section_written {
+        out_lines.extend(nyro_section.iter().cloned());
+        nyro_section_written = true;
+    }
+
+    let mut missing_keys: Vec<String> = Vec::new();
+    for &(key, ref val) in &nyro_keys {
+        if !found_keys.contains(&key) {
+            missing_keys.push(val.clone());
+        }
+    }
+    if !missing_keys.is_empty() {
+        missing_keys.push(String::new());
+        missing_keys.extend(out_lines);
+        out_lines = missing_keys;
+    }
+
+    if !nyro_section_written {
+        out_lines.push(String::new());
+        out_lines.extend(nyro_section.iter().cloned());
+    }
+
+    out_lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_updates_existing_keys_in_place() {
+        let existing = r#"model_catalog_json = "/Users/shivam94/.codex/nyro-models.json"
+model_provider = "nyro"
+model = "deepseek-v4-flash-2"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[features]
+goals = true
+
+[plugins."browser-use@openai-bundled"]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/path/nyro-models.json",
+            "gpt-5.3-codex",
+            "http://localhost:19530",
+        );
+
+        assert!(result.contains(r#"model_catalog_json = "/new/path/nyro-models.json""#));
+        assert!(result.contains(r#"model = "gpt-5.3-codex""#));
+        assert!(result.contains("[features]\ngoals = true"));
+        assert!(result.trim().ends_with(
+            "[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://localhost:19530/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
+        ));
+    }
+
+    #[test]
+    fn test_no_nyro_keys_prepends_them() {
+        let existing = r#"approvals_reviewer = "user"
+personality = "pragmatic"
+suppress_unstable_features_warning = true
+
+[features]
+goals = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/path/models.json",
+            "qwen-3.6-27b",
+            "http://localhost:19530",
+        );
+
+        assert!(result.starts_with(r#"model_catalog_json = "/path/models.json""#));
+        assert!(result.contains("model_provider = \"nyro\""));
+        assert!(result.contains("approvals_reviewer = \"user\""));
+        assert!(result.contains("[features]\ngoals = true"));
+    }
+
+    #[test]
+    fn test_replaces_existing_model_providers_section() {
+        let existing = r#"model_catalog_json = "old.json"
+model_provider = "nyro"
+model = "old-model"
+
+[model_providers]
+[model_providers.nyro]
+name = "Old Gateway"
+base_url = "http://old:19530/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[features]
+goals = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/path/models.json",
+            "new-model",
+            "http://new:19530",
+        );
+
+        assert!(result.contains(r#"model_catalog_json = "/new/path/models.json""#));
+        assert!(result.contains(r#"model = "new-model""#));
+        assert!(result.contains("[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://new:19530/v1\""));
+        assert!(!result.contains("Old Gateway"));
+        assert!(result.contains("[features]\ngoals = true"));
+    }
+
+    #[test]
+    fn test_empty_config_creates_fresh() {
+        let result = update_codex_config_toml(
+            None,
+            "/fresh/models.json",
+            "fresh-model",
+            "http://fresh:19530",
+        );
+
+        assert!(result.starts_with("model_catalog_json = \"/fresh/models.json\""));
+        assert!(result.contains("[model_providers]\n[model_providers.nyro]"));
+    }
+
+    #[test]
+    fn test_commented_nyro_keys_not_replaced() {
+        let existing = r#"# model_catalog_json = "commented-out.json"
+model_provider = "existing"
+
+[features]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/models.json",
+            "new-model",
+            "http://h:19530",
+        );
+
+        assert!(result.contains("# model_catalog_json = \"commented-out.json\""));
+        assert!(result.contains("model_catalog_json = \"/new/models.json\""));
+    }
+
+    #[test]
+    fn test_partial_nyro_keys_missing_ones_prepended() {
+        let existing = r#"model = "existing-model"
+
+[features]
+enabled = true
+"#;
+
+        let result = update_codex_config_toml(
+            Some(existing),
+            "/new/models.json",
+            "new-model",
+            "http://h:19530",
+        );
+
+        assert!(result.contains(r#"model = "new-model""#));
+        assert!(!result.contains(r#"model = "existing-model""#));
+        assert!(result.starts_with("model_catalog_json = \"/new/models.json\""));
+        assert!(result.contains("[features]\nenabled = true"));
+    }
+}
+
 #[tauri::command]
 pub async fn restore_cli_config(
     app: tauri::AppHandle,
@@ -1144,200 +1289,4 @@ pub async fn detect_cli_tools() -> Result<HashMap<String, bool>, String> {
     }
 
     Ok(status)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_updates_existing_keys_in_place() {
-        let existing = r#"model_catalog_json = "/Users/shivam94/.codex/nyro-models.json"
-model_provider = "nyro"
-model = "deepseek-v4-flash-2"
-model_reasoning_effort = "high"
-disable_response_storage = true
-
-[features]
-goals = true
-
-[plugins."browser-use@openai-bundled"]
-enabled = true
-"#;
-
-        let result = update_codex_config_toml(
-            Some(existing),
-            "/new/path/nyro-models.json",
-            "gpt-5.3-codex",
-            "http://localhost:19530",
-        );
-
-        // Nyro keys should be updated
-        assert!(result.contains(r#"model_catalog_json = "/new/path/nyro-models.json""#),
-            "model_catalog_json should update to new path");
-        assert!(result.contains(r#"model = "gpt-5.3-codex""#),
-            "model should update to new value");
-
-        // Non-Nyro sections preserved as-is
-        assert!(result.contains("[features]\ngoals = true"),
-            "features section preserved");
-        assert!(result.contains(r#"[plugins."browser-use@openai-bundled"]"#),
-            "plugin section preserved");
-
-        // model_providers section should be appended at end (wasn't in input)
-        assert!(result.trim().ends_with(
-            "[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://localhost:19530/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
-        ), "model_providers section should be at end of output");
-    }
-
-    #[test]
-    fn test_no_nyro_keys_prepends_them() {
-        let existing = r#"approvals_reviewer = "user"
-personality = "pragmatic"
-suppress_unstable_features_warning = true
-
-[features]
-goals = true
-
-[plugins."browser-use@openai-bundled"]
-enabled = true
-"#;
-
-        let result = update_codex_config_toml(
-            Some(existing),
-            "/path/models.json",
-            "qwen-3.6-27b",
-            "http://localhost:19530",
-        );
-
-        // All 5 Nyro keys should appear at the top (prepended)
-        assert!(result.starts_with(r#"model_catalog_json = "/path/models.json""#),
-            "model_catalog_json should be first line");
-        assert!(result.contains("\nmodel_provider = \"nyro\"\n"),
-            "model_provider should be present");
-        assert!(result.contains("\nmodel = \"qwen-3.6-27b\"\n"),
-            "model should be present");
-
-        // Original top-level keys preserved
-        assert!(result.contains("approvals_reviewer = \"user\""),
-            "approvals_reviewer preserved");
-        assert!(result.contains("suppress_unstable_features_warning = true"),
-            "suppress_unstable_features_warning preserved");
-
-        // Sections preserved
-        assert!(result.contains("[features]\ngoals = true"),
-            "features section preserved");
-
-        // model_providers at end
-        assert!(result.trim().ends_with(
-            "[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://localhost:19530/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
-        ), "model_providers section should be appended");
-    }
-
-    #[test]
-    fn test_replaces_existing_model_providers_section() {
-        let existing = r#"model_catalog_json = "old.json"
-model_provider = "nyro"
-model = "old-model"
-
-[model_providers]
-[model_providers.nyro]
-name = "Old Gateway"
-base_url = "http://old:19530/v1"
-wire_api = "responses"
-requires_openai_auth = true
-
-[features]
-goals = true
-"#;
-
-        let result = update_codex_config_toml(
-            Some(existing),
-            "/new/path/models.json",
-            "new-model",
-            "http://new:19530",
-        );
-
-        // Nyro keys updated in-place
-        assert!(result.contains(r#"model_catalog_json = "/new/path/models.json""#));
-        assert!(result.contains(r#"model = "new-model""#));
-
-        // model_providers content replaced
-        assert!(result.contains("[model_providers]\n[model_providers.nyro]\nname = \"Nyro Gateway\"\nbase_url = \"http://new:19530/v1\""));
-        // Old section content gone
-        assert!(!result.contains("Old Gateway"));
-        assert!(!result.contains("http://old:19530"));
-
-        // Section after model_providers preserved
-        assert!(result.contains("[features]\ngoals = true"));
-    }
-
-    #[test]
-    fn test_empty_config_creates_fresh() {
-        let result = update_codex_config_toml(
-            None,
-            "/fresh/models.json",
-            "fresh-model",
-            "http://fresh:19530",
-        );
-
-        assert!(result.starts_with("model_catalog_json = \"/fresh/models.json\""),
-            "starts with model_catalog_json");
-        assert!(result.contains("[model_providers]\n[model_providers.nyro]"),
-            "contains model_providers section");
-        assert!(result.contains("base_url = \"http://fresh:19530/v1\""),
-            "contains new host");
-    }
-
-    #[test]
-    fn test_commented_nyro_keys_not_replaced() {
-        let existing = r#"# model_catalog_json = "commented-out.json"
-model_provider = "existing"
-
-[features]
-enabled = true
-"#;
-
-        let result = update_codex_config_toml(
-            Some(existing),
-            "/new/models.json",
-            "new-model",
-            "http://h:19530",
-        );
-
-        // Commented line preserved as-is
-        assert!(result.contains("# model_catalog_json = \"commented-out.json\""),
-            "commented line preserved");
-        // New key prepended since commented version doesn't count
-        assert!(result.contains("model_catalog_json = \"/new/models.json\""),
-            "new key added for commented-out one");
-    }
-
-    #[test]
-    fn test_partial_nyro_keys_missing_ones_prepended() {
-        let existing = r#"model = "existing-model"
-
-[features]
-enabled = true
-"#;
-
-        let result = update_codex_config_toml(
-            Some(existing),
-            "/new/models.json",
-            "new-model",
-            "http://h:19530",
-        );
-
-        // Existing key replaced
-        assert!(result.contains(r#"model = "new-model""#));
-        assert!(!result.contains(r#"model = "existing-model""#));
-
-        // Missing keys prepended
-        assert!(result.starts_with("model_catalog_json = \"/new/models.json\""),
-            "missing model_catalog_json prepended");
-
-        // Section preserved
-        assert!(result.contains("[features]\nenabled = true"),
-            "section preserved");
-    }
 }

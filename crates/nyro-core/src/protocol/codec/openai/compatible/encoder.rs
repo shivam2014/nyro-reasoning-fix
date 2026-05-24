@@ -98,9 +98,18 @@ impl RequestEncoder for OpenAIEncoder {
             }
         }
 
-        // Passthrough any remaining unknown extra fields.
+        // Passthrough remaining ingress fields, excluding known
+        // protocol-foreign fields that don't belong in OpenAI Chat:
+        //   - client_metadata  (Google Gemini)
+        //   - include          (OpenAI Responses API)
+        //   - reasoning          (Responses API; Chat uses reasoning_effort)
+        // These are captured by  in the decoder but rejected
+        // by strict providers like Moonshot/Kimi.
+        const BLOCKED: &[&str] = &["client_metadata", "include", "reasoning"];
         for (k, v) in ingress {
-            obj.entry(k.clone()).or_insert_with(|| v.clone());
+            if !BLOCKED.contains(&k.as_str()) {
+                obj.entry(k.clone()).or_insert_with(|| v.clone());
+            }
         }
 
         Ok((body, HeaderMap::new()))
