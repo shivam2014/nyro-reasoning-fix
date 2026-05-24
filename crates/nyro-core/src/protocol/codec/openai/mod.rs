@@ -1,7 +1,2 @@
-pub mod types;
-pub mod decoder;
-pub mod encoder;
+pub mod compatible;
 pub mod responses;
-pub mod stream;
-pub mod chat;
-pub mod embeddings;

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::provider::VendorRegistry;
 use crate::provider::AuthMode;
+use crate::provider::VendorRegistry;
 
 pub fn default_provider_auth_mode() -> String {
     "apikey".to_string()
@@ -57,18 +55,10 @@ pub struct Provider {
     pub vendor: Option<String>,
     pub protocol: String,
     pub base_url: String,
-    #[serde(default)]
-    pub default_protocol: String,
-    /// JSON map of protocol -> endpoint config.
-    /// e.g. `{"openai":{"base_url":"https://..."},"anthropic":{"base_url":"https://..."}}`
-    #[serde(default)]
-    pub protocol_endpoints: String,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
     #[serde(alias = "modelsEndpoint")]
     pub models_source: Option<String>,
-    #[serde(alias = "capabilitiesSource")]
-    pub capabilities_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: String,
     #[serde(default = "default_provider_auth_mode")]
@@ -125,22 +115,6 @@ pub struct Route {
     pub target_provider: String,
     pub target_model: String,
     pub access_control: bool,
-    #[serde(default)]
-    #[serde(alias = "type")]
-    #[sqlx(default)]
-    pub route_type: String,
-    #[serde(default)]
-    #[sqlx(default)]
-    pub cache_exact_ttl: Option<i64>,
-    #[serde(default)]
-    #[sqlx(default)]
-    pub cache_semantic_ttl: Option<i64>,
-    #[serde(default)]
-    #[sqlx(default)]
-    pub cache_semantic_threshold: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[sqlx(skip)]
-    pub cache: Option<RouteCacheConfig>,
     pub is_enabled: bool,
     pub created_at: String,
     #[serde(default)]
@@ -163,17 +137,24 @@ pub struct RouteTarget {
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum RouteStrategy {
+    /// Weighted reservoir sampling — targets with higher weight are preferred.
     #[default]
     Weighted,
+    /// Priority groups — lower priority number tried first; random within group.
     Priority,
+    /// Cooldown-aware round-robin — deprioritises recently-used targets.
+    Cooldown,
+    /// Latency-ordered — targets sorted by ascending EMA response latency.
+    Latency,
 }
-
 
 impl RouteStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Weighted => "weighted",
             Self::Priority => "priority",
+            Self::Cooldown => "cooldown",
+            Self::Latency => "latency",
         }
     }
 }
@@ -185,6 +166,8 @@ impl std::str::FromStr for RouteStrategy {
         match s.trim().to_ascii_lowercase().as_str() {
             "weighted" => Ok(Self::Weighted),
             "priority" => Ok(Self::Priority),
+            "cooldown" => Ok(Self::Cooldown),
+            "latency" => Ok(Self::Latency),
             other => anyhow::bail!("unsupported route strategy: {other}"),
         }
     }
@@ -224,31 +207,55 @@ pub struct ApiKeyWithBindings {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RequestLog {
     pub id: String,
-    pub created_at: String,
+    /// Unix 毫秒时间戳
+    pub created_at: i64,
     pub api_key_id: Option<String>,
-    pub ingress_protocol: Option<String>,
-    pub egress_protocol: Option<String>,
-    pub request_model: Option<String>,
-    pub actual_model: Option<String>,
+    pub api_key_name: Option<String>,
+
+    pub client_protocol: Option<String>,
+    pub upstream_protocol: Option<String>,
+    pub provider_id: Option<String>,
     pub provider_name: Option<String>,
-    pub status_code: Option<i32>,
-    pub duration_ms: Option<f64>,
-    pub input_tokens: i32,
-    pub output_tokens: i32,
-    pub is_stream: bool,
-    pub is_tool_call: bool,
-    pub error_message: Option<String>,
-    pub response_preview: Option<String>,
+    pub route_id: Option<String>,
+    pub route_name: Option<String>,
+    pub upstream_url: Option<String>,
+    pub client_model: Option<String>,
+    pub upstream_model: Option<String>,
+
     pub method: Option<String>,
     pub path: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_headers: Option<String>,
+    pub client_request_headers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_body: Option<String>,
+    pub client_request_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_headers: Option<String>,
+    pub client_response_headers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_body: Option<String>,
+    pub client_response_body: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_response_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_response_body: Option<String>,
+
+    pub upstream_status_code: Option<i32>,
+    pub client_status_code: Option<i32>,
+
+    pub latency_total_ms: Option<i64>,
+    pub latency_upstream_ms: Option<i64>,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    #[serde(default)]
+    pub cache_read_tokens: i32,
+
+    pub is_stream: bool,
+    pub stream_chunks_count: i32,
+    pub stream_first_chunk_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,15 +264,10 @@ pub struct CreateProvider {
     pub vendor: Option<String>,
     pub protocol: String,
     pub base_url: String,
-    pub default_protocol: Option<String>,
-    /// JSON map: `{"openai":{"base_url":"..."}}`
-    pub protocol_endpoints: Option<String>,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
     #[serde(alias = "modelsSource")]
     pub models_source: Option<String>,
-    #[serde(alias = "capabilitiesSource")]
-    pub capabilities_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: String,
     #[serde(default = "default_provider_auth_mode")]
@@ -280,14 +282,10 @@ pub struct UpdateProvider {
     pub vendor: Option<String>,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
-    pub default_protocol: Option<String>,
-    pub protocol_endpoints: Option<String>,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
     #[serde(alias = "modelsSource")]
     pub models_source: Option<String>,
-    #[serde(alias = "capabilitiesSource")]
-    pub capabilities_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: Option<String>,
     pub auth_mode: Option<String>,
@@ -295,7 +293,7 @@ pub struct UpdateProvider {
     pub is_enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateRoute {
     pub name: Option<String>,
     #[serde(alias = "vmodel")]
@@ -306,16 +304,6 @@ pub struct UpdateRoute {
     #[serde(default)]
     pub targets: Option<Vec<UpsertRouteTarget>>,
     pub access_control: Option<bool>,
-    #[serde(alias = "type")]
-    pub route_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache: Option<RouteCacheConfig>,
-    #[serde(skip)]
-    pub cache_exact_ttl: Option<i64>,
-    #[serde(skip)]
-    pub cache_semantic_ttl: Option<i64>,
-    #[serde(skip)]
-    pub cache_semantic_threshold: Option<f64>,
     pub is_enabled: Option<bool>,
 }
 
@@ -330,35 +318,6 @@ pub struct CreateRoute {
     #[serde(default)]
     pub targets: Vec<CreateRouteTarget>,
     pub access_control: Option<bool>,
-    #[serde(alias = "type")]
-    pub route_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache: Option<RouteCacheConfig>,
-    #[serde(skip)]
-    pub cache_exact_ttl: Option<i64>,
-    #[serde(skip)]
-    pub cache_semantic_ttl: Option<i64>,
-    #[serde(skip)]
-    pub cache_semantic_threshold: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RouteCacheConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exact: Option<RouteExactCacheConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic: Option<RouteSemanticCacheConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteExactCacheConfig {
-    pub ttl: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteSemanticCacheConfig {
-    pub ttl: Option<i64>,
-    pub threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,16 +450,14 @@ pub struct ExportProvider {
     pub vendor: Option<String>,
     pub protocol: String,
     pub base_url: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub default_protocol: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub protocol_endpoints: String,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
     #[serde(alias = "modelsEndpoint")]
     pub models_source: Option<String>,
-    #[serde(alias = "capabilitiesSource")]
-    pub capabilities_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: String,
     #[serde(default = "default_provider_auth_mode")]
@@ -545,55 +502,6 @@ impl Provider {
             .as_deref()
             .filter(|v| !v.trim().is_empty())
     }
-
-    /// Resolve effective default_protocol: new field > legacy `protocol`.
-    pub fn effective_default_protocol(&self) -> &str {
-        let dp = self.default_protocol.trim();
-        if dp.is_empty() {
-            self.protocol.trim()
-        } else {
-            dp
-        }
-    }
-
-    /// Parse `protocol_endpoints` JSON into a map.
-    /// Falls back to building a single-entry map from legacy `protocol`/`base_url`.
-    pub fn parsed_protocol_endpoints(&self) -> HashMap<String, ProtocolEndpointEntry> {
-        if !self.protocol_endpoints.trim().is_empty() && self.protocol_endpoints.trim() != "{}"
-            && let Ok(map) = serde_json::from_str::<HashMap<String, ProtocolEndpointEntry>>(&self.protocol_endpoints)
-                && !map.is_empty() {
-                    return map;
-                }
-        let mut map = HashMap::new();
-        if !self.protocol.trim().is_empty() && !self.base_url.trim().is_empty() {
-            map.insert(
-                self.protocol.trim().to_string(),
-                ProtocolEndpointEntry {
-                    base_url: self.base_url.trim().to_string(),
-                },
-            );
-        }
-        map
-    }
-}
-
-impl Route {
-    pub fn normalized_route_type(&self) -> &str {
-        if self.route_type.trim().eq_ignore_ascii_case("embedding") {
-            "embedding"
-        } else {
-            "chat"
-        }
-    }
-
-    pub fn is_embedding_route(&self) -> bool {
-        self.normalized_route_type() == "embedding"
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProtocolEndpointEntry {
-    pub base_url: String,
 }
 
 impl CreateProvider {

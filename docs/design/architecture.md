@@ -119,7 +119,19 @@ nyro/
 │           ├── logging/
 │           ├── crypto/
 │           ├── cache/
-│           └── admin/
+│           └── admin/                    # AdminService 管理面核心逻辑（按职责拆分）
+│               ├── mod.rs                # 公共类型、模块声明、AdminService 构造
+│               ├── providers.rs          # Provider CRUD / 复制 / 连通性测试 / 模型发现
+│               ├── oauth.rs              # OAuth session、Provider 绑定、重连、登出与刷新
+│               ├── routes.rs             # Route CRUD、target 写入与 route cache reload
+│               ├── api_keys.rs           # API Key CRUD 与名称唯一性校验
+│               ├── settings.rs           # Settings 与 cache runtime 管理
+│               ├── observability.rs      # 请求日志查询与统计概览
+│               ├── import_export.rs      # 配置导入 / 导出
+│               ├── model_catalog.rs      # models.dev 缓存、模型列表与能力解析
+│               ├── auth_data.rs          # OAuth credential/session DTO 转换 helper
+│               ├── route_data.rs         # Route target/cache 归一化与校验 helper
+│               └── session_tests.rs      # auth session 私有状态机单元测试
 ├── src-tauri/
 ├── src-server/
 └── webui/
@@ -159,6 +171,12 @@ Gateway::admin()          → 返回 AdminService，提供全部管理操作
   └── ...
 Gateway::shutdown()       → 优雅关闭
 ```
+
+`AdminService` 是管理面唯一入口，但内部实现按功能职责分布在
+`crates/nyro-core/src/admin/` 子模块中。外部调用方仍只通过
+`Gateway::admin()` 获取服务实例；子模块仅用于维护边界划分，不引入新的传输层或
+运行时抽象。公开管理面回归测试位于 `crates/nyro-core/tests/admin.rs`；只有需要访问私有
+auth-session 状态机的测试保留在 `admin/session_tests.rs`。
 
 ---
 
@@ -531,10 +549,9 @@ CREATE TABLE providers (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     vendor       TEXT,              -- canonical vendor_id（custom / openai / ...）
+    protocol     TEXT NOT NULL,     -- canonical protocol suite（openai-compatible / ...）
     base_url     TEXT NOT NULL,
-    api_key      TEXT NOT NULL,     -- AES-256-GCM 加密存储
-    default_protocol TEXT,          -- canonical ProtocolId
-    protocol_endpoints TEXT         -- JSON: { "openai/chat/v1": { base_url: "..." } }
+    api_key      TEXT NOT NULL      -- AES-256-GCM 加密存储
 );
 
 -- 路由规则

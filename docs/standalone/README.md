@@ -36,11 +36,16 @@ providers:
         base_url: https://api.anthropic.com
     api_key: ${ANTHROPIC_API_KEY}
 
-  - name: deepseek
+  - name: deepseek-openai
     default_protocol: openai
     endpoints:
       openai:
         base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+
+  - name: deepseek-anthropic
+    default_protocol: anthropic
+    endpoints:
       anthropic:
         base_url: https://api.deepseek.com/anthropic
     api_key: ${DEEPSEEK_API_KEY}
@@ -62,7 +67,7 @@ routes:
     vmodel: deepseek-chat
     strategy: priority
     targets:
-      - provider: deepseek
+      - provider: deepseek-openai
         model: deepseek-chat
         priority: 1
       - provider: openai
@@ -71,7 +76,6 @@ routes:
 
   - name: text-embedding-3-small
     vmodel: text-embedding-3-small
-    type: embedding
     targets:
       - provider: openai
         model: text-embedding-3-small

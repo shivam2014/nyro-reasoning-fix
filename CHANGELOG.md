@@ -4,6 +4,159 @@ All notable changes to Nyro will be documented in this file.
 
 ---
 
+## v1.7.6
+
+> Released on 2026-05-22
+
+#### Features
+
+- **Vertex AI provider support** (#172): add Vertex AI as a built-in provider and fix Gemini ingress authentication handling
+- **Provider copy workflow** (#173): allow duplicating an existing provider configuration with a single action
+- **Route target inheritance in provider copy** (#178): automatically append route target associations when copying a provider
+- **Client cache hint forwarding** (#181): forward `anthropic-beta` cache-control hints from the client request to the upstream provider without leaking client identity headers
+- **Upstream error evidence preservation** (#184): capture and surface upstream response body and status code when proxy forwarding fails, improving debugging visibility
+- **Gemini stream JSON handling** (#182): handle non-streaming JSON responses returned by Gemini stream endpoints, parsing them into the unified IR stream pipeline
+
+#### Improvements / Refactoring
+
+- **Protocol slug unification** (#174): replace opaque short codes with descriptive canonical Protocol identifiers across the codebase
+- **GoogleGenerativeAI → GoogleGemini rename** (#175): rename the protocol enum variant and unify all Google/Gemini endpoint constants
+- **Codec directory restructuring** (#176): reorganize the codec module into a `vendor/endpoint` directory layout aligned with protocol boundaries
+- **Admin modularization** (#180): split monolithic admin handler into focused sub-modules for cleaner separation of concerns
+
+#### Fixes
+
+- **Storage E2E model sync** (#167): align storage E2E test harness with current model definitions
+- **Storage E2E auth mode** (#168): use valid `apikey` auth_mode in storage E2E harness
+- **Storage E2E token check** (#169): remove unreliable `total_output_tokens` assertion from storage E2E tests
+- **Postgres api_keys INSERT** (#170): remove stale `status` column from the api_keys INSERT statement
+- **Postgres AVG() f64 compatibility** (#171): cast `AVG()` results to `FLOAT8` for proper f64 mapping in Rust
+
+---
+
+## v1.7.5
+
+> Released on 2026-05-19
+
+#### Fixes
+
+- **Ingress decode failure logging** (#164): record request-decode failures from Anthropic Messages, OpenAI-compatible Chat Completions / Embeddings / Responses, and Google Generate Content ingress handlers in the in-app log module with request metadata and 400 responses
+- **Anthropic context management beta compatibility** (#165): accept the `context_management` request shape sent by the Anthropic `context-management-2025-06-27` beta, preserving it as pass-through JSON instead of rejecting requests that omit the obsolete outer `type` field
+
+---
+
+## v1.7.4
+
+> Released on 2026-05-19
+
+#### Improvements / Refactoring
+
+- **Provider configuration simplification** (#160): collapse provider storage and UI from protocol endpoint mappings to a single `protocol` / `base_url` pair, with migration support for legacy rows and aligned standalone config docs/tests
+
+#### Fixes
+
+- **OpenAI-compatible streaming completion** (#162): deduplicate terminal `Done` events when both `finish_reason` and `[DONE]` are observed, preventing duplicate end-of-stream notifications
+
+---
+
+## v1.7.3
+
+> Released on 2026-05-18
+
+#### Features
+
+- **IR and protocol codec pipeline overhaul** (#145–#153): reshape the internal request/response representation around `AiRequest`, `AiResponse`, `AiStreamDelta`, expanded `ContentBlock`, `AiError`, `CacheControl`, and `ProtocolExt`; switch ingress decoders, egress encoders, response/stream parsers, dispatcher, provider adapters, and cache flow to consume the new IR directly; remove the legacy `InternalRequest` / `InternalResponse` path and align codec traits on the `Decoder` / `Encoder` vocabulary
+- **Request log metadata enrichment** (#154): persist `provider_name`, `api_key_name`, `route_id`, and `route_name` alongside request logs, and restore `is_stream` capture for stream/non-stream visibility
+- **Prompt-cache usage accounting** (#156): capture chat-completions prompt-cache hit tokens so cache-read usage is preserved in downstream accounting
+
+#### Fixes
+
+- **Protocol conversion thinking preservation** (#157): bridge Anthropic thinking blocks into OpenAI-compatible `reasoning_content`
+- **OpenAI Responses streaming usage** (#140): preserve `input_tokens` across streaming usage deltas
+- **WebUI log detail loading** (#139): map `backend("get_log")` to `GET /api/v1/logs/:id`
+- **Provider icons** (#133, #134): fix undefined provider icons in add/edit flows and correctly display empty custom icons
+- **macOS app lifecycle** (#132): reopen the main window when the Dock icon is clicked
+- **musl build warnings** (#130): silence dead-code warnings on musl builds
+
+#### Refactoring / Internal
+
+- Restructure proxy ingress code into protocol-specific subdirectories (#135)
+- Replace `capabilities_source` string handling with typed `CapabilitiesSource` presets (#136)
+- Remove `route_type` and endpoint subset filtering from route handling (#137)
+- Split dispatcher internals with `CallCtx`, `CacheWriteCtx`, `RequestExtras`, `LogBuilder`, integrations hooks, routing strategies, and module renames (#141–#143)
+- Add the IR field-homing design skeleton and follow-up deprecation/test/doc cleanup (#138, #144)
+
+---
+
+## v1.7.2
+
+> Released on 2026-05-12
+
+#### Fixes
+
+- **musl static build: eliminate OpenSSL dependency** (#125): add `default-features = false` to the workspace `reqwest` dependency and switch to `rustls-tls-native-roots`; this removes the `default-tls` feature that was silently pulling `native-tls` → `openssl-sys` into the build graph, which caused the `*-unknown-linux-musl` CI jobs to fail; `http2`, `charset`, and `macos-system-configuration` are retained explicitly to avoid regressions; TLS engine remains `rustls` on all platforms while native certificate stores (Windows Cert Store / macOS Keychain / Linux `/etc/ssl/certs`) continue to be used on non-musl targets
+- **musl static build: sqlite-vec BSD type compatibility** (#125): inject `CFLAGS_<target>=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t` in CI for musl targets so that `sqlite-vec v0.1.9`'s C source (which uses POSIX `u_int*_t` types absent from musl libc) compiles correctly via cc-rs's target-specific CFLAGS lookup
+
+---
+
+## v1.7.1
+
+> Released on 2026-05-12
+
+#### Features
+
+- **musl static build for Linux** (#123): add `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` release targets; switch sqlx to `tls-rustls` to eliminate the OpenSSL runtime dependency; add `cfg(target_env = "musl")` branch in `crypto/mod.rs` for master-key resolution via env var / file path fallback (avoids dbus/libsecret static-link issue)
+
+#### Fixes
+
+- **ARM Linux sqlite-vec extension ABI** (#121): use platform-native `c_char` / `c_int` types in the `sqlite3_auto_extension` registration call so the symbol signature matches libsqlite3-sys on aarch64 Linux
+
+#### Internal
+
+- Apply `rustfmt` across the entire codebase; add `make fmt` / `make fmt-check` targets to `Makefile` (#124)
+
+---
+
+## v1.7.0
+
+> Released on 2026-05-12
+
+#### Features
+
+- **System tray lifecycle fix** (#118): prevent app exit on window close — hide to tray instead; fix `TrayIcon` drop bug by managing lifetime via `app.manage()`; left-click tray icon restores window
+- **nyro-tools proxy subcommand rewrite** (#111): replace `--upstream-protocol` + `--upstream-endpoint` with single `--url` (`-u`); auto-detect and strip client version prefix from egress URL; restrict forwarding to known LLM ingress paths; add structured JSON logging with UUID correlation id and protocol-aware SSE assembly for all four protocols; add `-o/--output` for log file output and `-l/--log-mode` (all|req|resp) filter
+- **Claude Code OAuth on latest architecture** (#101): new `auth/drivers/claude.rs` PKCE driver registered through vendor-registry pipeline; add `anthropic/claude-code` channel and extension with OAuth-owned auth headers; introduce `compose_upstream_headers` helper centralizing the "OAuth driver suppresses default auth" invariant across all four upstream call sites; pin invariant with regression tests
+- **OAuth provider flow** (#58): add full OAuth credential support, Codex OAuth channel, and runtime wiring into proxy and Tauri
+- **Three-layer CI testing pyramid** (#84): Phase 1 — unit tests for protocol transformers (tool-call fragments, Anthropic thinking deltas, DeepSeek reasoning, Responses output items, tool correlation); Phase 2 — build artifact job + L3 Ollama E2E (7 links); Phase 3 — L2 aimock static E2E with 4 isolated instances (8 fixtures); Phase 4 — migrate smoke tests to `tests/e2e/`, add `storage-backends.yml` (pgvector daily schedule)
+- **Protocol / ProtocolEndpoint / Vendor three-concept model** (#89–#97, #119): replace the ambiguous `ProtocolFamily` with a clean orthogonal identity system — `Protocol` (enum: `OpenAICompatible` / `OpenAIResponses` / `AnthropicMessages` / `GoogleGenerativeAI`) for wire-format suite, `ProtocolEndpoint` (`{protocol, name, version}`) for specific API endpoint, `Vendor` via existing `Provider.vendor`; canonical short names (`openai-compat`, `openai-resps`, `anthropic-msgs`, `google-genai`) in config/JSON; three-tier alias table for full backward compatibility (old canonical strings, legacy brand names `openai`/`claude`/`gemini`, short aliases) with no data migration; `protocol_endpoints` JSON upgraded to protocol-keyed format (`base_url` at protocol level, optional `endpoints` subset array) with automatic migration on first read via `normalize_endpoints_json`
+- **Upstream response headers logging**: `call_non_stream` now returns `(Value, u16, HeaderMap)` preserving headers before `.json()` consumes the response; all three proxy paths (JSON, SSE stream, force-stream) capture upstream response headers and persist to `response_headers` in the request log
+- **Root health endpoint**: `GET /` and `HEAD /` return `{"status":"ok"}`, enabling load-balancer and Kubernetes liveness probes that default to `HEAD /`
+
+#### Refactoring
+
+- **Provider layer overhaul** (#107): merge `ProviderAdapter` + `VendorExtension` into unified `Vendor` trait via `VendorRegistry`; activate PassThrough fast-path through `negotiate()` to skip IR codec round-trip when ingress == egress protocol; `dispatch_pipeline` takes `RawEnvelope` + `AiRequest` at surface; `dispatcher.rs` split into `mod.rs` + `util.rs` + `accumulator.rs`; `Gateway` runtime fields migrated from `RwLock` to `ArcSwap` eliminating hot-path `.await`; CODEC_SCHEMA_VERSION bumped to 2
+- **Kernel stabilization** (#104): unified `GatewayError` taxonomy (15 variants, stable codes); `RequestContext` lifecycle tracking; observability and security split out of `handler.rs` into dedicated modules; single-orchestration `dispatcher.rs` replacing prior multi-file handler split
+- **OAuth credential storage** (#82): split credentials into dedicated `provider_oauth_credentials` table with CAS state machine (`connected` / `refreshing` / `error`) and optimistic lock (`status_version`); `OAuthCredentialStore` trait with 8 methods implemented for SQLite, PostgreSQL, and Memory; remove `access_token` / `refresh_token` / `expires_at` from `Provider` struct; auto-migrate existing OAuth data from `providers` table on startup; background refresh now uses `list_expiring()` + CAS
+- **Codec directories restructured by protocol**: old `codec/openai/`, `codec/anthropic/`, `codec/google/` removed; replaced by fully self-contained `codec/openai_compatible/`, `codec/openai_responses/`, `codec/anthropic_messages/`, `codec/google_generative/`
+- **Trait and type renames**: `ProtocolHandler` → `EndpointHandler`; `ProtocolCapabilities` → `EndpointCapabilities`; `ProtocolRegistration` → `EndpointRegistration`; `list_by_family` → `list_by_protocol`; backward-compat `pub use` aliases retained; `ProtocolFamily` and `VendorScope::Family` removed
+- **authMode normalization** (#73): rename preset JSON field `auth_mode` → `authMode`, narrow value `"api_key"` → `"apikey"` across JSON, DB, Rust and TypeScript; add SQLite/Postgres startup migration; reshape provider create/edit OAuth panel layout
+- **`protocol-id.ts` replaced by `protocol.ts`**: new `PROTOCOL_TABLE`, `PROTOCOL_ALIASES`, `resolveProtocol`, `parseProtocolEndpoint`; `prettyName` returns Protocol display name only; Providers/Connect/Routes pages aligned to canonical IDs
+
+#### Fixes
+
+- Preserve thinking metadata across protocol conversion (#114)
+- Preserve full Anthropic usage fields; enable native passthrough for ZhipuAI and MiniMax (#115)
+- Fix stream passthrough error propagation and `RawEvent` forwarding (#112)
+- `passthrough_run` now substitutes virtual model alias with `actual_model` (#109)
+- Preserve `reasoning_content` through proxy for DeepSeek thinking mode (#98)
+- Correct URL and auth header composition for OpenAI-compat vendors on Anthropic egress (#105)
+- Handle mlx-lm `reasoning` field name; include `reasoning_content` in non-streaming responses (#103)
+- Preserve Anthropic Thinking blocks through gateway (#90)
+- Fix dark mode text contrast for `text-slate-800` (#100)
+- Fix missing lock file and directory in runtime Docker build (#71)
+
+---
+
 ## v1.6.2
 
 > Released on 2026-04-19

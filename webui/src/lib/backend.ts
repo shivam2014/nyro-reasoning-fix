@@ -66,6 +66,12 @@ function resolveHTTP(cmd: string, args?: Record<string, unknown>): HTTPMapping {
       return { method: "GET", url: `${base}/providers/presets` };
     case "create_provider":
       return { method: "POST", url: `${base}/providers`, body: args?.input as Record<string, unknown> };
+    case "copy_provider":
+      return {
+        method: "POST",
+        url: `${base}/providers/${args?.id}/copy`,
+        body: (args?.options ?? {}) as Record<string, unknown>,
+      };
     case "update_provider":
       return { method: "PUT", url: `${base}/providers/${args?.id}`, body: args?.input as Record<string, unknown> };
     case "delete_provider":
@@ -146,6 +152,8 @@ function resolveHTTP(cmd: string, args?: Record<string, unknown>): HTTPMapping {
       const qs = params.toString();
       return { method: "GET", url: `${base}/logs${qs ? "?" + qs : ""}` };
     }
+    case "get_log":
+      return { method: "GET", url: `${base}/logs/${args?.id}` };
 
     case "get_stats_overview": {
       const hours = args?.hours;
@@ -177,22 +185,6 @@ function resolveHTTP(cmd: string, args?: Record<string, unknown>): HTTPMapping {
       return { method: "GET", url: `${base}/settings/${args?.key}` };
     case "set_setting":
       return { method: "PUT", url: `${base}/settings/${args?.key}`, body: { value: args?.value } };
-
-    case "get_cache_settings":
-      return { method: "GET", url: `${base}/cache/settings` };
-    case "update_cache_settings":
-      return { method: "PUT", url: `${base}/cache/settings`, body: args?.input as Record<string, unknown> };
-    case "detect_embedding_dimensions":
-      return {
-        method: "GET",
-        url: `${base}/cache/embedding-dimensions?embedding_route=${encodeURIComponent(String(args?.embeddingRoute ?? ""))}`,
-      };
-    case "flush_cache":
-      return { method: "POST", url: `${base}/cache/flush` };
-    case "delete_cache_key":
-      return { method: "DELETE", url: `${base}/cache/${encodeURIComponent(String(args?.key ?? ""))}` };
-    case "get_cache_stats":
-      return { method: "GET", url: `${base}/cache/stats` };
 
     case "get_gateway_status":
       return { method: "GET", url: `${base}/status` };

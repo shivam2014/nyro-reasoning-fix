@@ -34,12 +34,16 @@ pub struct Deadline {
 impl Deadline {
     /// Create a deadline `ttl` from now.
     pub fn from_now(ttl: Duration) -> Self {
-        Self { at: Instant::now() + ttl }
+        Self {
+            at: Instant::now() + ttl,
+        }
     }
 
     /// A deadline that never fires (useful for unit tests / health probes).
     pub fn never() -> Self {
-        Self { at: Instant::now() + Duration::from_secs(86400 * 365 * 100) }
+        Self {
+            at: Instant::now() + Duration::from_secs(86400 * 365 * 100),
+        }
     }
 
     /// Returns `true` if the deadline has already passed.
@@ -107,7 +111,10 @@ pub enum RequestOutcome {
 impl RequestOutcome {
     /// Returns `true` for the two success variants.
     pub fn is_success(&self) -> bool {
-        matches!(self, RequestOutcome::Success | RequestOutcome::PartialSuccess { .. })
+        matches!(
+            self,
+            RequestOutcome::Success | RequestOutcome::PartialSuccess { .. }
+        )
     }
 
     /// Best-effort HTTP status code for quota/health accounting.
@@ -157,7 +164,11 @@ impl TraceSink {
     pub fn push(&self, started_at: Instant, tag: &'static str, detail: impl Into<String>) {
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         if let Ok(mut guard) = self.0.lock() {
-            guard.push(TraceEvent { elapsed_ms, tag, detail: detail.into() });
+            guard.push(TraceEvent {
+                elapsed_ms,
+                tag,
+                detail: detail.into(),
+            });
         }
     }
 
@@ -265,15 +276,15 @@ use axum::response::Response;
 /// The timeout used is 300 s (matching the existing reqwest client timeout).
 /// P2 can thread per-route timeouts through here once `RequestContext` carries
 /// a configurable timeout.
-pub async fn inject_context(
-    mut request: Request,
-    next: Next,
-) -> Response {
+pub async fn inject_context(mut request: Request, next: Next) -> Response {
     // We don't know the ingress protocol at middleware time; it will be
     // overwritten by the ingress handler via `inject_context_with_protocol`.
     // Use a sentinel until then.
-    use crate::protocol::ids::{OPENAI_CHAT_V1};
-    let ctx = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(300));
+    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    let ctx = RequestContext::new(
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        Duration::from_secs(300),
+    );
     request.extensions_mut().insert(ctx);
     next.run(request).await
 }
@@ -289,19 +300,28 @@ pub fn stamp_ingress_protocol(ctx: &mut RequestContext, protocol: ProtocolId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::OPENAI_CHAT_V1;
+    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 
     #[test]
     fn request_id_is_unique() {
-        let a = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30));
-        let b = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30));
+        let a = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        );
+        let b = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        );
         assert_ne!(a.request_id, b.request_id);
         assert!(a.request_id.starts_with("req-"));
     }
 
     #[test]
     fn outcome_write_once() {
-        let ctx = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30));
+        let ctx = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        );
         ctx.set_outcome(RequestOutcome::Success);
         ctx.set_outcome(RequestOutcome::ClientCancelled); // second write ignored
         assert_eq!(ctx.get_outcome(), Some(&RequestOutcome::Success));
@@ -309,7 +329,10 @@ mod tests {
 
     #[test]
     fn cancellation_token_shared() {
-        let ctx = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30));
+        let ctx = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        );
         let token = ctx.cancellation.clone();
         assert!(!token.is_cancelled());
         ctx.cancellation.cancel();
@@ -325,7 +348,10 @@ mod tests {
 
     #[test]
     fn trace_sink_push_snapshot() {
-        let ctx = RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30));
+        let ctx = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        );
         ctx.trace("intake", "body parsed");
         ctx.trace("security", "api_key validated");
         let events = ctx.trace.snapshot();

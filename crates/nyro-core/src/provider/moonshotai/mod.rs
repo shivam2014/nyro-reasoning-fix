@@ -6,38 +6,48 @@ use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
-use crate::protocol::types::{InternalRequest, InternalResponse};
-use crate::provider::adapter::{ProviderAdapter, ProviderCtx};
+use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::openai::{
-    openai_bearer_auth_headers, openai_build_url, openai_compat_build_request,
-    openai_compat_parse_response, openai_compat_stream_parser, openai_map_error,
+    openai_bearer_auth_headers, openai_build_url, openai_map_error,
 };
+use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
-use crate::provider::metadata::{AuthMode, ChannelDef, Label, ProtocolBaseUrl, VendorMetadata};
+use crate::provider::metadata::{
+    AuthMode, CapabilitiesSource, ChannelDef, Label, ProtocolBaseUrl, VendorMetadata,
+};
 use crate::provider::outbound::OutboundRequest;
-use crate::provider::registry::{ProviderAdapterRegistration, VendorRegistration, VendorScope};
-use crate::provider::stream::ProviderStreamParser;
-use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
+use crate::provider::registry::{VendorRegistration, VendorScope};
+use crate::provider::vendor::{ProviderCtx, Vendor};
+use crate::provider::vendor_ext::VendorCtx;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "moonshotai",
-    label: Label { zh: "Moonshot AI", en: "Moonshot AI" },
+    label: Label {
+        zh: "Moonshot AI",
+        en: "Moonshot AI",
+    },
     icon: "kimi",
-    default_protocol: "openai",
+    default_protocol: "openai-compatible",
     channels: &[
         ChannelDef {
             id: "default",
-            label: Label { zh: "默认", en: "Default" },
+            label: Label {
+                zh: "默认",
+                en: "Default",
+            },
             base_urls: &[
-                ProtocolBaseUrl { protocol: "openai", base_url: "https://api.moonshot.ai/v1" },
                 ProtocolBaseUrl {
-                    protocol: "anthropic",
+                    protocol: "openai-compatible",
+                    base_url: "https://api.moonshot.ai/v1",
+                },
+                ProtocolBaseUrl {
+                    protocol: "anthropic-messages",
                     base_url: "https://api.moonshot.ai/anthropic",
                 },
             ],
             api_key: None,
             models_source: Some("https://api.moonshot.ai/v1/models"),
-            capabilities_source: Some("ai://models.dev/moonshotai"),
+            capabilities_source: CapabilitiesSource::ModelsDev("moonshotai"),
             static_models: &[],
             auth_mode: AuthMode::ApiKey,
             oauth: None,
@@ -45,17 +55,23 @@ const METADATA: VendorMetadata = VendorMetadata {
         },
         ChannelDef {
             id: "china",
-            label: Label { zh: "中国站", en: "China" },
+            label: Label {
+                zh: "中国站",
+                en: "China",
+            },
             base_urls: &[
-                ProtocolBaseUrl { protocol: "openai", base_url: "https://api.moonshot.cn/v1" },
                 ProtocolBaseUrl {
-                    protocol: "anthropic",
+                    protocol: "openai-compatible",
+                    base_url: "https://api.moonshot.cn/v1",
+                },
+                ProtocolBaseUrl {
+                    protocol: "anthropic-messages",
                     base_url: "https://api.moonshot.cn/anthropic",
                 },
             ],
             api_key: None,
             models_source: Some("https://api.moonshot.cn/v1/models"),
-            capabilities_source: Some("ai://models.dev/moonshotai"),
+            capabilities_source: CapabilitiesSource::ModelsDev("moonshotai"),
             static_models: &[],
             auth_mode: AuthMode::ApiKey,
             oauth: None,
@@ -66,29 +82,52 @@ const METADATA: VendorMetadata = VendorMetadata {
 
 pub struct MoonshotaiVendor;
 
-impl VendorExtension for MoonshotaiVendor {
-    fn scope(&self) -> VendorScope { VendorScope::Vendor { vendor_id: "moonshotai" } }
-    fn metadata(&self) -> Option<&'static VendorMetadata> { Some(&METADATA) }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap { openai_bearer_auth_headers(ctx) }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String { openai_build_url(base_url, path) }
-}
-
 #[async_trait]
-impl ProviderAdapter for MoonshotaiVendor {
-    fn vendor_id(&self) -> &'static str { "moonshotai" }
+impl Vendor for MoonshotaiVendor {
+    fn scope(&self) -> VendorScope {
+        VendorScope::Vendor {
+            vendor_id: "moonshotai",
+        }
+    }
+    fn metadata(&self) -> Option<&'static VendorMetadata> {
+        Some(&METADATA)
+    }
+    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
+        openai_bearer_auth_headers(ctx)
+    }
+    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
+        openai_build_url(base_url, path)
+    }
+    fn vendor_id(&self) -> &'static str {
+        "moonshotai"
+    }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::OPENAI_CHAT_V1;
-        &[OPENAI_CHAT_V1]
+        use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+        &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
     }
-    async fn build_request(&self, req: &mut InternalRequest, ctx: &ProviderCtx<'_>) -> Result<OutboundRequest, GatewayError> {
-        openai_compat_build_request(self, req, ctx).await
+    fn declared_request_mutations(&self) -> bool {
+        false
     }
-    async fn parse_response(&self, resp: InboundResponse, ctx: &ProviderCtx<'_>) -> Result<InternalResponse, GatewayError> {
-        openai_compat_parse_response(self, resp, ctx).await
+    fn declared_response_mutations(&self) -> bool {
+        false
     }
-    fn stream_parser(&self, ctx: &ProviderCtx<'_>) -> Box<dyn ProviderStreamParser + Send> { openai_compat_stream_parser(ctx) }
-    fn map_error(&self, status: u16, body: Value) -> GatewayError { openai_map_error("moonshotai", status, body) }
+    async fn build_request(
+        &self,
+        req: &mut AiRequest,
+        ctx: &ProviderCtx<'_>,
+    ) -> Result<OutboundRequest, GatewayError> {
+        pipeline::build_request(self, req, ctx).await
+    }
+    async fn parse_response(
+        &self,
+        resp: InboundResponse,
+        ctx: &ProviderCtx<'_>,
+    ) -> Result<AiResponse, GatewayError> {
+        pipeline::parse_response(self, resp, ctx).await
+    }
+    fn map_error(&self, status: u16, body: Value) -> GatewayError {
+        openai_map_error("moonshotai", status, body)
+    }
 }
 
 inventory::submit! { VendorRegistration { make: || Box::new(MoonshotaiVendor) } }
-inventory::submit! { ProviderAdapterRegistration { make: || Box::new(MoonshotaiVendor) } }

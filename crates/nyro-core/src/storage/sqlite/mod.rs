@@ -16,7 +16,7 @@ use crate::db::models::{
 };
 use crate::logging::LogEntry;
 use crate::storage::traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, CacheStore, LogStore, OAuthCredentialStore,
+    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore, OAuthCredentialStore,
     ProviderStore, ProviderTestResult, RouteSnapshotStore, RouteStore, RouteTargetStore,
     SettingsStore, Storage, StorageBackend, StorageBootstrap, StorageHealth, UsageWindow,
 };
@@ -38,16 +38,12 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     pub async fn from_config(config: &GatewayConfig) -> anyhow::Result<Self> {
         let pool = db::init_pool(&config.data_dir).await?;
-        let storage = Self::from_pool_with_dimensions(pool, config.cache.semantic.vector_dimensions);
+        let storage = Self::from_pool(pool);
         storage.bootstrap().migrate().await?;
         Ok(storage)
     }
 
     pub fn from_pool(pool: SqlitePool) -> Self {
-        Self::from_pool_with_dimensions(pool, 1536)
-    }
-
-    pub fn from_pool_with_dimensions(pool: SqlitePool, vector_dimensions: usize) -> Self {
         let provider_store = Arc::new(SqliteProviderStore { pool: pool.clone() });
         let route_store = Arc::new(SqliteRouteStore { pool: pool.clone() });
         let route_target_store = Arc::new(SqliteRouteTargetStore { pool: pool.clone() });
@@ -56,10 +52,7 @@ impl SqliteStorage {
         let auth_store = Arc::new(SqliteAuthAccessStore { pool: pool.clone() });
         let oauth_credential_store = Arc::new(SqliteOAuthCredentialStore { pool: pool.clone() });
         let log_store = Arc::new(SqliteLogStore { pool: pool.clone() });
-        let bootstrap = Arc::new(SqliteBootstrap {
-            pool: pool.clone(),
-            vector_dimensions: vector_dimensions.max(1),
-        });
+        let bootstrap = Arc::new(SqliteBootstrap { pool: pool.clone() });
         Self {
             pool,
             provider_store,
@@ -110,10 +103,6 @@ impl Storage for SqliteStorage {
 
     fn logs(&self) -> &dyn LogStore {
         self.log_store.as_ref()
-    }
-
-    fn cache(&self) -> Option<&dyn CacheStore> {
-        Some(self.log_store.as_ref())
     }
 
     fn oauth_credentials(&self) -> &dyn OAuthCredentialStore {
@@ -253,11 +242,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
             .context("credential not found after complete_refresh")
     }
 
-    async fn fail_refresh(
-        &self,
-        provider_id: &str,
-        error_message: &str,
-    ) -> anyhow::Result<()> {
+    async fn fail_refresh(&self, provider_id: &str, error_message: &str) -> anyhow::Result<()> {
         sqlx::query(
             r#"UPDATE provider_oauth_credentials SET
                    status = 'error', last_error = ?,
@@ -317,7 +302,7 @@ struct SqliteProviderStore {
 impl ProviderStore for SqliteProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, COALESCE(default_protocol, protocol) AS default_protocol, COALESCE(protocol_endpoints, '{}') AS protocol_endpoints, preset_key, channel, models_source, capabilities_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers ORDER BY created_at DESC",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -325,7 +310,7 @@ impl ProviderStore for SqliteProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, COALESCE(default_protocol, protocol) AS default_protocol, COALESCE(protocol_endpoints, '{}') AS protocol_endpoints, preset_key, channel, models_source, capabilities_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers WHERE id = ?",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -336,61 +321,48 @@ impl ProviderStore for SqliteProviderStore {
         let id = uuid::Uuid::new_v4().to_string();
         let vendor = normalize_provider_vendor(input.vendor.as_deref());
         let models_source = input.effective_models_source().map(ToString::to_string);
-        let default_protocol = input
-            .default_protocol
-            .as_deref()
-            .unwrap_or(input.protocol.as_str());
-        let protocol_endpoints = input.protocol_endpoints.as_deref().unwrap_or("{}");
         if !is_valid_provider_auth_mode(&input.auth_mode) {
             anyhow::bail!("unsupported provider auth_mode: {}", input.auth_mode);
         }
         sqlx::query(
-            "INSERT INTO providers (id, name, vendor, protocol, base_url, default_protocol, protocol_endpoints, preset_key, channel, models_source, capabilities_source, static_models, api_key, auth_mode, use_proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, auth_mode, use_proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.name)
         .bind(&vendor)
         .bind(&input.protocol)
         .bind(&input.base_url)
-        .bind(default_protocol)
-        .bind(protocol_endpoints)
         .bind(&input.preset_key)
         .bind(&input.channel)
         .bind(&models_source)
-        .bind(&input.capabilities_source)
         .bind(&input.static_models)
         .bind(&input.api_key)
         .bind(&input.auth_mode)
         .bind(input.use_proxy)
         .execute(&self.pool)
         .await?;
-        self.get(&id).await?.context("provider missing after create")
+        self.get(&id)
+            .await?
+            .context("provider missing after create")
     }
 
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider> {
-        let current = self.get(id).await?.context("provider not found for update")?;
-        let models_source_input = input
-            .effective_models_source()
-            .map(ToString::to_string);
+        let current = self
+            .get(id)
+            .await?
+            .context("provider not found for update")?;
+        let models_source_input = input.models_source.map(|value| value.trim().to_string());
         let name = input.name.unwrap_or(current.name);
         let vendor = if input.vendor.is_some() {
             normalize_provider_vendor(input.vendor.as_deref())
         } else {
             normalize_provider_vendor(current.vendor.as_deref())
         };
-        let models_source = models_source_input
-            .or_else(|| current.models_source.clone());
+        let models_source = models_source_input.or_else(|| current.models_source.clone());
         let protocol = input.protocol.unwrap_or(current.protocol.clone());
         let base_url = input.base_url.unwrap_or(current.base_url);
-        let default_protocol = input
-            .default_protocol
-            .unwrap_or(current.default_protocol);
-        let protocol_endpoints = input
-            .protocol_endpoints
-            .unwrap_or(current.protocol_endpoints);
         let preset_key = input.preset_key.or(current.preset_key);
         let channel = input.channel.or(current.channel);
-        let capabilities_source = input.capabilities_source.or(current.capabilities_source);
         let static_models = input.static_models.or(current.static_models);
         let api_key = input.api_key.unwrap_or(current.api_key);
         let auth_mode = input.auth_mode.unwrap_or(current.auth_mode);
@@ -401,18 +373,15 @@ impl ProviderStore for SqliteProviderStore {
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-            "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, default_protocol=?, protocol_endpoints=?, preset_key=?, channel=?, models_source=?, capabilities_source=?, static_models=?, api_key=?, auth_mode=?, use_proxy=?, is_enabled=?, updated_at=datetime('now') WHERE id=?",
+            "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, preset_key=?, channel=?, models_source=?, static_models=?, api_key=?, auth_mode=?, use_proxy=?, is_enabled=?, updated_at=datetime('now') WHERE id=?",
         )
         .bind(name)
         .bind(vendor)
         .bind(&protocol)
         .bind(base_url)
-        .bind(default_protocol)
-        .bind(protocol_endpoints)
         .bind(preset_key)
         .bind(channel)
         .bind(&models_source)
-        .bind(capabilities_source)
         .bind(static_models)
         .bind(api_key)
         .bind(auth_mode)
@@ -425,10 +394,29 @@ impl ProviderStore for SqliteProviderStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "DELETE FROM route_targets
+             WHERE provider_id = ?
+                OR route_id IN (SELECT id FROM routes WHERE target_provider = ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DELETE FROM routes WHERE target_provider = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
         sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -453,7 +441,11 @@ impl ProviderStore for SqliteProviderStore {
         Ok(row.is_some())
     }
 
-    async fn record_test_result(&self, provider_id: &str, result: ProviderTestResult) -> anyhow::Result<()> {
+    async fn record_test_result(
+        &self,
+        provider_id: &str,
+        result: ProviderTestResult,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE providers SET last_test_success = ?, last_test_at = datetime('now') WHERE id = ?",
         )
@@ -494,7 +486,7 @@ impl SqliteRouteStore {
 impl RouteStore for SqliteRouteStore {
     async fn list(&self) -> anyhow::Result<Vec<Route>> {
         Ok(sqlx::query_as::<_, Route>(
-            "SELECT id, name, virtual_model, COALESCE(strategy, 'weighted') AS strategy, target_provider, target_model, COALESCE(access_control, 0) AS access_control, COALESCE(route_type, 'chat') AS route_type, cache_exact_ttl, cache_semantic_ttl, cache_semantic_threshold, COALESCE(is_enabled, 1) AS is_enabled, created_at FROM routes ORDER BY created_at DESC",
+            "SELECT id, name, virtual_model, COALESCE(strategy, 'weighted') AS strategy, target_provider, target_model, COALESCE(access_control, 0) AS access_control, COALESCE(is_enabled, 1) AS is_enabled, created_at FROM routes ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -502,7 +494,7 @@ impl RouteStore for SqliteRouteStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Route>> {
         Ok(sqlx::query_as::<_, Route>(
-            "SELECT id, name, virtual_model, COALESCE(strategy, 'weighted') AS strategy, target_provider, target_model, COALESCE(access_control, 0) AS access_control, COALESCE(route_type, 'chat') AS route_type, cache_exact_ttl, cache_semantic_ttl, cache_semantic_threshold, COALESCE(is_enabled, 1) AS is_enabled, created_at FROM routes WHERE id = ?",
+            "SELECT id, name, virtual_model, COALESCE(strategy, 'weighted') AS strategy, target_provider, target_model, COALESCE(access_control, 0) AS access_control, COALESCE(is_enabled, 1) AS is_enabled, created_at FROM routes WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -513,14 +505,9 @@ impl RouteStore for SqliteRouteStore {
         let id = uuid::Uuid::new_v4().to_string();
         let virtual_model = input.virtual_model.trim().to_string();
         let strategy = input.strategy.unwrap_or_else(|| "weighted".to_string());
-        let route_type = input
-            .route_type
-            .unwrap_or_else(|| "chat".to_string())
-            .trim()
-            .to_string();
         if self.has_match_pattern_column().await? {
             sqlx::query(
-                "INSERT INTO routes (id, name, virtual_model, match_pattern, strategy, target_provider, target_model, access_control, route_type, cache_exact_ttl, cache_semantic_ttl, cache_semantic_threshold) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO routes (id, name, virtual_model, match_pattern, strategy, target_provider, target_model, access_control) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(input.name.trim())
@@ -530,15 +517,11 @@ impl RouteStore for SqliteRouteStore {
             .bind(input.target_provider.trim())
             .bind(input.target_model.trim())
             .bind(input.access_control.unwrap_or(false))
-            .bind(route_type)
-            .bind(input.cache_exact_ttl)
-            .bind(input.cache_semantic_ttl)
-            .bind(input.cache_semantic_threshold)
             .execute(&self.pool)
             .await?;
         } else {
             sqlx::query(
-                "INSERT INTO routes (id, name, virtual_model, strategy, target_provider, target_model, access_control, route_type, cache_exact_ttl, cache_semantic_ttl, cache_semantic_threshold) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO routes (id, name, virtual_model, strategy, target_provider, target_model, access_control) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(input.name.trim())
@@ -547,10 +530,6 @@ impl RouteStore for SqliteRouteStore {
             .bind(input.target_provider.trim())
             .bind(input.target_model.trim())
             .bind(input.access_control.unwrap_or(false))
-            .bind(route_type)
-            .bind(input.cache_exact_ttl)
-            .bind(input.cache_semantic_ttl)
-            .bind(input.cache_semantic_threshold)
             .execute(&self.pool)
             .await?;
         }
@@ -569,19 +548,11 @@ impl RouteStore for SqliteRouteStore {
         let target_provider = input.target_provider.unwrap_or(current.target_provider);
         let target_model = input.target_model.unwrap_or(current.target_model);
         let access_control = input.access_control.unwrap_or(current.access_control);
-        let route_type = input
-            .route_type
-            .unwrap_or(current.route_type)
-            .trim()
-            .to_string();
-        let cache_exact_ttl = input.cache_exact_ttl;
-        let cache_semantic_ttl = input.cache_semantic_ttl;
-        let cache_semantic_threshold = input.cache_semantic_threshold;
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         if self.has_match_pattern_column().await? {
             sqlx::query(
-                "UPDATE routes SET name=?, virtual_model=?, match_pattern=?, strategy=?, target_provider=?, target_model=?, access_control=?, route_type=?, cache_exact_ttl=?, cache_semantic_ttl=?, cache_semantic_threshold=?, is_enabled=? WHERE id=?",
+                "UPDATE routes SET name=?, virtual_model=?, match_pattern=?, strategy=?, target_provider=?, target_model=?, access_control=?, is_enabled=? WHERE id=?",
             )
             .bind(name.trim())
             .bind(&virtual_model)
@@ -590,17 +561,13 @@ impl RouteStore for SqliteRouteStore {
             .bind(target_provider.trim())
             .bind(target_model.trim())
             .bind(access_control)
-            .bind(route_type)
-            .bind(cache_exact_ttl)
-            .bind(cache_semantic_ttl)
-            .bind(cache_semantic_threshold)
             .bind(is_enabled)
             .bind(id)
             .execute(&self.pool)
             .await?;
         } else {
             sqlx::query(
-                "UPDATE routes SET name=?, virtual_model=?, strategy=?, target_provider=?, target_model=?, access_control=?, route_type=?, cache_exact_ttl=?, cache_semantic_ttl=?, cache_semantic_threshold=?, is_enabled=? WHERE id=?",
+                "UPDATE routes SET name=?, virtual_model=?, strategy=?, target_provider=?, target_model=?, access_control=?, is_enabled=? WHERE id=?",
             )
             .bind(name.trim())
             .bind(&virtual_model)
@@ -608,10 +575,6 @@ impl RouteStore for SqliteRouteStore {
             .bind(target_provider.trim())
             .bind(target_model.trim())
             .bind(access_control)
-            .bind(route_type)
-            .bind(cache_exact_ttl)
-            .bind(cache_semantic_ttl)
-            .bind(cache_semantic_threshold)
             .bind(is_enabled)
             .bind(id)
             .execute(&self.pool)
@@ -679,7 +642,6 @@ impl RouteStore for SqliteRouteStore {
         };
         Ok(row.is_some())
     }
-
 }
 
 #[async_trait]
@@ -692,10 +654,6 @@ impl RouteSnapshotStore for SqliteRouteStore {
                 COALESCE(strategy, 'weighted') AS strategy,
                 target_provider, target_model,
                 COALESCE(access_control, 0) AS access_control,
-                COALESCE(route_type, 'chat') AS route_type,
-                cache_exact_ttl,
-                cache_semantic_ttl,
-                cache_semantic_threshold,
                 COALESCE(is_enabled, 1) AS is_enabled,
                 created_at
             FROM routes
@@ -788,9 +746,11 @@ impl SettingsStore for SqliteSettingsStore {
     }
 
     async fn list_all(&self) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings")
-            .fetch_all(&self.pool)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings")
+                .fetch_all(&self.pool)
+                .await?,
+        )
     }
 }
 
@@ -875,9 +835,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
         .await?;
 
         replace_api_key_routes(&self.pool, &id, &input.route_ids).await?;
-        self.get(&id)
-            .await?
-            .context("api key missing after create")
+        self.get(&id).await?.context("api key missing after create")
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
@@ -915,9 +873,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             replace_api_key_routes(&self.pool, id, &route_ids).await?;
         }
 
-        self.get(id)
-            .await?
-            .context("api key missing after update")
+        self.get(id).await?.context("api key missing after update")
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
@@ -963,6 +919,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
             _,
             (
                 String,
+                String,
                 bool,
                 Option<String>,
                 Option<i32>,
@@ -970,14 +927,15 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 Option<i32>,
                 Option<i32>,
             ),
-        >("SELECT id, COALESCE(is_enabled, 1) AS is_enabled, expires_at, rpm, rpd, tpm, tpd FROM api_keys WHERE key = ?")
+        >("SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, 1) AS is_enabled, expires_at, rpm, rpd, tpm, tpd FROM api_keys WHERE key = ?")
         .bind(raw_key)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row.map(
-            |(id, is_enabled, expires_at, rpm, rpd, tpm, tpd)| ApiKeyAccessRecord {
+            |(id, name, is_enabled, expires_at, rpm, rpd, tpm, tpd)| ApiKeyAccessRecord {
                 id,
+                name,
                 is_enabled,
                 expires_at,
                 rpm,
@@ -1003,13 +961,17 @@ impl AuthAccessStore for SqliteAuthAccessStore {
         list_api_key_route_ids(&self.pool, api_key_id).await
     }
 
-    async fn request_count_since(&self, api_key_id: &str, window: UsageWindow) -> anyhow::Result<i64> {
+    async fn request_count_since(
+        &self,
+        api_key_id: &str,
+        window: UsageWindow,
+    ) -> anyhow::Result<i64> {
         let expr = match window {
             UsageWindow::Minute => "-1 minute",
             UsageWindow::Day => "-1 day",
         };
         Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND created_at >= datetime('now', ?)",
+            "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000",
         )
         .bind(api_key_id)
         .bind(expr)
@@ -1017,13 +979,17 @@ impl AuthAccessStore for SqliteAuthAccessStore {
         .await?)
     }
 
-    async fn token_count_since(&self, api_key_id: &str, window: UsageWindow) -> anyhow::Result<i64> {
+    async fn token_count_since(
+        &self,
+        api_key_id: &str,
+        window: UsageWindow,
+    ) -> anyhow::Result<i64> {
         let expr = match window {
             UsageWindow::Minute => "-1 minute",
             UsageWindow::Day => "-1 day",
         };
         Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM request_logs WHERE api_key_id = ? AND created_at >= datetime('now', ?)",
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM request_logs WHERE api_key_id = ? AND created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000",
         )
         .bind(api_key_id)
         .bind(expr)
@@ -1032,7 +998,10 @@ impl AuthAccessStore for SqliteAuthAccessStore {
     }
 }
 
-async fn list_api_key_route_ids(pool: &SqlitePool, api_key_id: &str) -> anyhow::Result<Vec<String>> {
+async fn list_api_key_route_ids(
+    pool: &SqlitePool,
+    api_key_id: &str,
+) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT route_id FROM api_key_routes WHERE api_key_id = ? ORDER BY route_id ASC",
     )
@@ -1076,33 +1045,53 @@ impl LogStore for SqliteLogStore {
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
                 r#"INSERT INTO request_logs
-                    (id, api_key_id, ingress_protocol, egress_protocol, request_model, actual_model,
-                     provider_name, status_code, duration_ms, input_tokens, output_tokens,
-                     is_stream, is_tool_call, error_message, response_preview,
-                     method, path, request_headers, request_body, response_headers, response_body)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                    (id, created_at, api_key_id, api_key_name,
+                     client_protocol, upstream_protocol, provider_id, provider_name, route_id, route_name, upstream_url,
+                     client_model, upstream_model,
+                     method, path,
+                     client_request_headers, client_request_body,
+                     client_response_headers, client_response_body,
+                     upstream_request_headers, upstream_request_body,
+                     upstream_response_headers, upstream_response_body,
+                     upstream_status_code, client_status_code,
+                     latency_total_ms, latency_upstream_ms,
+                     input_tokens, output_tokens, cache_read_tokens,
+                     is_stream, stream_chunks_count, stream_first_chunk_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             )
             .bind(&id)
+            .bind(entry.created_at)
             .bind(&entry.api_key_id)
-            .bind(&entry.ingress_protocol)
-            .bind(&entry.egress_protocol)
-            .bind(&entry.request_model)
-            .bind(&entry.actual_model)
+            .bind(&entry.api_key_name)
+            .bind(&entry.client_protocol)
+            .bind(&entry.upstream_protocol)
+            .bind(&entry.provider_id)
             .bind(&entry.provider_name)
-            .bind(entry.status_code)
-            .bind(entry.duration_ms)
-            .bind(entry.usage.input_tokens as i32)
-            .bind(entry.usage.output_tokens as i32)
-            .bind(entry.is_stream as i32)
-            .bind(entry.is_tool_call as i32)
-            .bind(&entry.error_message)
-            .bind(&entry.response_preview)
+            .bind(&entry.route_id)
+            .bind(&entry.route_name)
+            .bind(&entry.upstream_url)
+            .bind(&entry.client_model)
+            .bind(&entry.upstream_model)
             .bind(&entry.method)
             .bind(&entry.path)
-            .bind(&entry.request_headers)
-            .bind(&entry.request_body)
-            .bind(&entry.response_headers)
-            .bind(&entry.response_body)
+            .bind(&entry.client_request_headers)
+            .bind(&entry.client_request_body)
+            .bind(&entry.client_response_headers)
+            .bind(&entry.client_response_body)
+            .bind(&entry.upstream_request_headers)
+            .bind(&entry.upstream_request_body)
+            .bind(&entry.upstream_response_headers)
+            .bind(&entry.upstream_response_body)
+            .bind(entry.upstream_status_code)
+            .bind(entry.client_status_code)
+            .bind(entry.latency_total_ms)
+            .bind(entry.latency_upstream_ms)
+            .bind(entry.input_tokens())
+            .bind(entry.output_tokens())
+            .bind(entry.cache_read_tokens())
+            .bind(entry.is_stream)
+            .bind(entry.stream_chunks_count)
+            .bind(entry.stream_first_chunk_ms)
             .execute(&self.pool)
             .await?;
         }
@@ -1113,27 +1102,38 @@ impl LogStore for SqliteLogStore {
         let mut count_sql = String::from("SELECT COUNT(*) AS total FROM request_logs WHERE 1=1");
         // List query skips the heavy body/header columns (NULL placeholders preserve struct layout).
         let mut data_sql = String::from(
-            "SELECT id, created_at, api_key_id, ingress_protocol, egress_protocol, request_model, actual_model, provider_name, status_code, duration_ms, input_tokens, output_tokens, is_stream, is_tool_call, error_message, response_preview, method, path, NULL AS request_headers, NULL AS request_body, NULL AS response_headers, NULL AS response_body FROM request_logs WHERE 1=1",
+            "SELECT id, COALESCE(CAST(created_at AS INTEGER), 0) AS created_at, api_key_id, api_key_name, \
+             client_protocol, upstream_protocol, provider_id, provider_name, route_id, route_name, upstream_url, \
+             client_model, upstream_model, method, path, \
+             NULL AS client_request_headers, NULL AS client_request_body, \
+             NULL AS client_response_headers, NULL AS client_response_body, \
+             NULL AS upstream_request_headers, NULL AS upstream_request_body, \
+             NULL AS upstream_response_headers, NULL AS upstream_response_body, \
+             upstream_status_code, client_status_code, \
+             CAST(latency_total_ms AS INTEGER) AS latency_total_ms, latency_upstream_ms, \
+             input_tokens, output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, \
+             COALESCE(is_stream, 0) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
+             FROM request_logs WHERE 1=1",
         );
         let mut bind_values: Vec<String> = Vec::new();
         if let Some(provider) = query.provider.filter(|v| !v.is_empty()) {
-            count_sql.push_str(" AND provider_name = ?");
-            data_sql.push_str(" AND provider_name = ?");
+            count_sql.push_str(" AND provider_id = ?");
+            data_sql.push_str(" AND provider_id = ?");
             bind_values.push(provider);
         }
         if let Some(model) = query.model.filter(|v| !v.is_empty()) {
-            count_sql.push_str(" AND actual_model = ?");
-            data_sql.push_str(" AND actual_model = ?");
+            count_sql.push_str(" AND upstream_model = ?");
+            data_sql.push_str(" AND upstream_model = ?");
             bind_values.push(model);
         }
         if let Some(status_min) = query.status_min {
-            count_sql.push_str(" AND status_code >= ?");
-            data_sql.push_str(" AND status_code >= ?");
+            count_sql.push_str(" AND client_status_code >= ?");
+            data_sql.push_str(" AND client_status_code >= ?");
             bind_values.push(status_min.to_string());
         }
         if let Some(status_max) = query.status_max {
-            count_sql.push_str(" AND status_code <= ?");
-            data_sql.push_str(" AND status_code <= ?");
+            count_sql.push_str(" AND client_status_code <= ?");
+            data_sql.push_str(" AND client_status_code <= ?");
             bind_values.push(status_max.to_string());
         }
 
@@ -1155,7 +1155,18 @@ impl LogStore for SqliteLogStore {
 
     async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<RequestLog>> {
         let row = sqlx::query_as::<_, RequestLog>(
-            "SELECT id, created_at, api_key_id, ingress_protocol, egress_protocol, request_model, actual_model, provider_name, status_code, duration_ms, input_tokens, output_tokens, is_stream, is_tool_call, error_message, response_preview, method, path, request_headers, request_body, response_headers, response_body FROM request_logs WHERE id = ?",
+            "SELECT id, COALESCE(CAST(created_at AS INTEGER), 0) AS created_at, api_key_id, api_key_name, \
+             client_protocol, upstream_protocol, provider_id, provider_name, route_id, route_name, upstream_url, \
+             client_model, upstream_model, method, path, \
+             client_request_headers, client_request_body, \
+             client_response_headers, client_response_body, \
+             upstream_request_headers, upstream_request_body, \
+             upstream_response_headers, upstream_response_body, \
+             upstream_status_code, client_status_code, \
+             CAST(latency_total_ms AS INTEGER) AS latency_total_ms, latency_upstream_ms, \
+             input_tokens, output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, \
+             COALESCE(is_stream, 0) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
+             FROM request_logs WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1164,7 +1175,10 @@ impl LogStore for SqliteLogStore {
     }
 
     async fn cleanup_before(&self, cutoff_expression: &str) -> anyhow::Result<u64> {
-        let result = sqlx::query("DELETE FROM request_logs WHERE created_at < datetime('now', ?)")
+        // created_at is Unix milliseconds; convert cutoff to ms via strftime.
+        let result = sqlx::query(
+            "DELETE FROM request_logs WHERE created_at < CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000"
+        )
             .bind(cutoff_expression)
             .execute(&self.pool)
             .await?;
@@ -1174,14 +1188,14 @@ impl LogStore for SqliteLogStore {
     async fn stats_overview(&self, hours: Option<i64>) -> anyhow::Result<StatsOverview> {
         if let Some(hours) = hours {
             Ok(sqlx::query_as::<_, StatsOverview>(
-                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs WHERE created_at >= datetime('now', ?)",
+                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000",
             )
             .bind(format!("-{hours} hours"))
             .fetch_one(&self.pool)
             .await?)
         } else {
             Ok(sqlx::query_as::<_, StatsOverview>(
-                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs",
+                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs",
             )
             .fetch_one(&self.pool)
             .await?)
@@ -1190,7 +1204,7 @@ impl LogStore for SqliteLogStore {
 
     async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>> {
         Ok(sqlx::query_as::<_, StatsHourly>(
-            "SELECT strftime('%Y-%m-%d %H:00:00', created_at) AS hour, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= datetime('now', ?) GROUP BY hour ORDER BY hour ASC",
+            "SELECT strftime('%Y-%m-%d %H:00:00', datetime(created_at/1000, 'unixepoch')) AS hour, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY hour ORDER BY hour ASC",
         )
         .bind(format!("-{hours} hours"))
         .fetch_all(&self.pool)
@@ -1200,14 +1214,14 @@ impl LogStore for SqliteLogStore {
     async fn stats_by_model(&self, hours: Option<i64>) -> anyhow::Result<Vec<ModelStats>> {
         if let Some(hours) = hours {
             Ok(sqlx::query_as::<_, ModelStats>(
-                "SELECT actual_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= datetime('now', ?) GROUP BY actual_model ORDER BY request_count DESC",
+                "SELECT upstream_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY upstream_model ORDER BY request_count DESC",
             )
             .bind(format!("-{hours} hours"))
             .fetch_all(&self.pool)
             .await?)
         } else {
             Ok(sqlx::query_as::<_, ModelStats>(
-                "SELECT actual_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms FROM request_logs GROUP BY actual_model ORDER BY request_count DESC",
+                "SELECT upstream_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs GROUP BY upstream_model ORDER BY request_count DESC",
             )
             .fetch_all(&self.pool)
             .await?)
@@ -1217,14 +1231,14 @@ impl LogStore for SqliteLogStore {
     async fn stats_by_provider(&self, hours: Option<i64>) -> anyhow::Result<Vec<ProviderStats>> {
         if let Some(hours) = hours {
             Ok(sqlx::query_as::<_, ProviderStats>(
-                "SELECT provider_name AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= datetime('now', ?) GROUP BY provider_name ORDER BY request_count DESC",
+                "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC",
             )
             .bind(format!("-{hours} hours"))
             .fetch_all(&self.pool)
             .await?)
         } else {
             Ok(sqlx::query_as::<_, ProviderStats>(
-                "SELECT provider_name AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(duration_ms), 0.0) AS avg_duration_ms FROM request_logs GROUP BY provider_name ORDER BY request_count DESC",
+                "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC",
             )
             .fetch_all(&self.pool)
             .await?)
@@ -1232,59 +1246,9 @@ impl LogStore for SqliteLogStore {
     }
 }
 
-#[async_trait]
-impl CacheStore for SqliteLogStore {
-    async fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        let row = sqlx::query_as::<_, (Vec<u8>,)>(
-            "SELECT data FROM cache_entries WHERE key = ? AND datetime(expires_at) > datetime('now')",
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|v| v.0))
-    }
-
-    async fn set(&self, key: &str, data: &[u8], ttl: Option<Duration>) -> anyhow::Result<()> {
-        let ttl_secs = ttl.unwrap_or_else(|| Duration::from_secs(3600)).as_secs() as i64;
-        sqlx::query(
-            "INSERT INTO cache_entries (key, data, expires_at, created_at) VALUES (?, ?, datetime('now', ?), datetime('now')) \
-             ON CONFLICT(key) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at",
-        )
-        .bind(key)
-        .bind(data)
-        .bind(format!("+{ttl_secs} seconds"))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM cache_entries WHERE key = ?")
-            .bind(key)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn flush(&self) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM cache_entries")
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn cleanup_expired(&self) -> anyhow::Result<u64> {
-        let result = sqlx::query("DELETE FROM cache_entries WHERE datetime(expires_at) <= datetime('now')")
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected())
-    }
-}
-
 #[derive(Clone)]
 struct SqliteBootstrap {
     pool: SqlitePool,
-    vector_dimensions: usize,
 }
 
 #[async_trait]
@@ -1294,7 +1258,7 @@ impl StorageBootstrap for SqliteBootstrap {
     }
 
     async fn migrate(&self) -> anyhow::Result<()> {
-        db::migrate(&self.pool, self.vector_dimensions).await
+        db::migrate(&self.pool).await
     }
 
     async fn health(&self) -> anyhow::Result<StorageHealth> {
@@ -1306,5 +1270,4 @@ impl StorageBootstrap for SqliteBootstrap {
             writable: true,
         })
     }
-
 }

@@ -1,48 +1,48 @@
 //! Google vendor (Gemini direct API).
 
-pub mod gemini_cli;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
-use crate::protocol::types::{InternalRequest, InternalResponse};
-use crate::provider::adapter::{ProviderAdapter, ProviderCtx};
-use crate::provider::common::openai::{
-    openai_compat_build_request, openai_compat_parse_response, openai_compat_stream_parser,
-};
+use crate::protocol::ir::{AiRequest, AiResponse};
+use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
-use crate::provider::metadata::{AuthMode, ChannelDef, Label, ProtocolBaseUrl, VendorMetadata};
+use crate::provider::metadata::{
+    AuthMode, CapabilitiesSource, ChannelDef, Label, ProtocolBaseUrl, VendorMetadata,
+};
 use crate::provider::outbound::OutboundRequest;
-use crate::protocol::ids::ProtocolFamily;
-use crate::provider::registry::{ProviderAdapterRegistration, VendorRegistration, VendorScope};
-use crate::provider::stream::ProviderStreamParser;
+use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
+use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "google",
-    label: Label { zh: "Google", en: "Google" },
+    label: Label {
+        zh: "Google",
+        en: "Google",
+    },
     icon: "google",
-    default_protocol: "gemini",
+    default_protocol: "google-gemini",
     channels: &[ChannelDef {
         id: "default",
-        label: Label { zh: "默认", en: "Default" },
+        label: Label {
+            zh: "默认",
+            en: "Default",
+        },
         base_urls: &[
             ProtocolBaseUrl {
-                protocol: "openai",
+                protocol: "openai-compatible",
                 base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
             },
             ProtocolBaseUrl {
-                protocol: "gemini",
+                protocol: "google-gemini",
                 base_url: "https://generativelanguage.googleapis.com",
             },
         ],
         api_key: None,
-        models_source: Some(
-            "https://generativelanguage.googleapis.com/v1beta/openai/models",
-        ),
-        capabilities_source: Some("ai://models.dev/google"),
+        models_source: Some("https://generativelanguage.googleapis.com/v1beta/openai/models"),
+        capabilities_source: CapabilitiesSource::ModelsDev("google"),
         static_models: &[],
         auth_mode: AuthMode::ApiKey,
         oauth: None,
@@ -52,9 +52,12 @@ const METADATA: VendorMetadata = VendorMetadata {
 
 pub struct GoogleVendor;
 
-impl VendorExtension for GoogleVendor {
+#[async_trait]
+impl Vendor for GoogleVendor {
     fn scope(&self) -> VendorScope {
-        VendorScope::Vendor { vendor_id: "google" }
+        VendorScope::Vendor {
+            vendor_id: "google",
+        }
     }
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
@@ -67,33 +70,32 @@ impl VendorExtension for GoogleVendor {
             format!("{url}?key={}", ctx.api_key)
         }
     }
-}
-
-#[async_trait]
-impl ProviderAdapter for GoogleVendor {
     fn vendor_id(&self) -> &'static str {
         "google"
     }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::GOOGLE_GENERATE_V1BETA;
-        &[GOOGLE_GENERATE_V1BETA]
+        use crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+        &[GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA]
+    }
+    fn declared_request_mutations(&self) -> bool {
+        false
+    }
+    fn declared_response_mutations(&self) -> bool {
+        false
     }
     async fn build_request(
         &self,
-        req: &mut InternalRequest,
+        req: &mut AiRequest,
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
-        openai_compat_build_request(self, req, ctx).await
+        pipeline::build_request(self, req, ctx).await
     }
     async fn parse_response(
         &self,
         resp: InboundResponse,
         ctx: &ProviderCtx<'_>,
-    ) -> Result<InternalResponse, GatewayError> {
-        openai_compat_parse_response(self, resp, ctx).await
-    }
-    fn stream_parser(&self, ctx: &ProviderCtx<'_>) -> Box<dyn ProviderStreamParser + Send> {
-        openai_compat_stream_parser(ctx)
+    ) -> Result<AiResponse, GatewayError> {
+        pipeline::parse_response(self, resp, ctx).await
     }
     fn map_error(&self, status: u16, body: Value) -> GatewayError {
         let msg = body
@@ -106,20 +108,16 @@ impl ProviderAdapter for GoogleVendor {
     }
 }
 
-inventory::submit! {
-    VendorRegistration { make: || Box::new(GoogleVendor) }
-}
-
-inventory::submit! {
-    ProviderAdapterRegistration { make: || Box::new(GoogleVendor) }
-}
+inventory::submit! { VendorRegistration { make: || Box::new(GoogleVendor) } }
 
 /// Family-level fallback for providers with blank/unknown vendor on Google-family protocols.
 pub struct GoogleFamilyExt;
 
 impl VendorExtension for GoogleFamilyExt {
     fn scope(&self) -> VendorScope {
-        VendorScope::Family(ProtocolFamily::Google)
+        VendorScope::Vendor {
+            vendor_id: "google",
+        }
     }
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         None
@@ -134,6 +132,4 @@ impl VendorExtension for GoogleFamilyExt {
     }
 }
 
-inventory::submit! {
-    VendorRegistration { make: || Box::new(GoogleFamilyExt) }
-}
+inventory::submit! { ExtensionRegistration { make: || Box::new(GoogleFamilyExt) } }

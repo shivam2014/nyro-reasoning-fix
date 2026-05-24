@@ -5,9 +5,7 @@ import { ChevronLeft, ChevronRight, GitBranch, Pencil, Plus, Route as RouteIcon,
 import { backend } from "@/lib/backend";
 import { localizeBackendErrorMessage } from "@/lib/backend-error";
 import type {
-  CacheSettings,
   CreateRoute,
-  RouteCacheConfig,
   CreateRouteTarget,
   ModelCapabilities,
   Provider,
@@ -17,7 +15,6 @@ import type {
   UpsertRouteTarget,
 } from "@/lib/types";
 import { useLocale } from "@/lib/i18n";
-import { parseProtocolId } from "@/lib/protocol-id";
 import { ProviderIcon } from "@/components/ui/provider-icon";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -39,12 +36,8 @@ type RouteForm = {
   name: string;
   virtual_model: string;
   strategy: RouteStrategy;
-  route_type: "chat" | "embedding";
   targets: RouteTargetForm[];
   access_control: boolean;
-  cache_exact_enabled: boolean;
-  cache_semantic_enabled: boolean;
-  cache_semantic_threshold: string;
 };
 
 type RouteTargetForm = {
@@ -59,12 +52,8 @@ const emptyCreate: RouteForm = {
   name: "",
   virtual_model: "",
   strategy: "weighted",
-  route_type: "chat",
   targets: [{ provider_id: "", model: "", weight: 100, priority: 1 }],
   access_control: false,
-  cache_exact_enabled: false,
-  cache_semantic_enabled: false,
-  cache_semantic_threshold: "",
 };
 
 function FieldLabel({ children }: { children: string }) {
@@ -76,52 +65,8 @@ function strategyLabel(value: RouteStrategy, isZh: boolean) {
   return isZh ? "加权轮询" : "Weighted";
 }
 
-function routeTypeLabel(value: "chat" | "embedding", isZh: boolean) {
-  return value === "embedding" ? (isZh ? "向量路由" : "Embedding") : (isZh ? "对话路由" : "Chat");
-}
-
 function hasProviderModelsEndpoint(provider?: Provider) {
   return Boolean(provider?.models_source?.trim());
-}
-
-function providerSupportsOpenAiEndpoint(provider?: Provider) {
-  if (!provider) return false;
-  // Accept any protocol identifier whose family resolves to OpenAI —
-  // covers legacy `openai` short name, canonical `openai/chat/v1`, and
-  // future OpenAI dialects (`openai/responses/v1`, `openai/embeddings/v1`).
-  const isOpenAiKey = (raw: string): boolean => {
-    const id = parseProtocolId(raw);
-    return id?.family === "openai";
-  };
-  const raw = provider.protocol_endpoints?.trim();
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as Record<string, { base_url?: string }>;
-      for (const [key, value] of Object.entries(parsed)) {
-        if (isOpenAiKey(key) && Boolean(value?.base_url?.trim())) {
-          return true;
-        }
-      }
-    } catch {
-      // ignore invalid json and fallback to legacy protocol/base_url fields
-    }
-  }
-  return isOpenAiKey(provider.protocol) && Boolean(provider.base_url.trim());
-}
-
-function normalizeTargetsForRouteType(
-  routeType: "chat" | "embedding",
-  targets: RouteTargetForm[],
-  providerMap: Map<string, Provider>,
-) {
-  if (routeType !== "embedding") return targets;
-  return targets.map((target) => {
-    const provider = providerMap.get(target.provider_id);
-    if (!target.provider_id || providerSupportsOpenAiEndpoint(provider)) {
-      return target;
-    }
-    return { ...target, provider_id: "", model: "" };
-  });
 }
 
 function withCurrentModel(options: string[], current?: string) {
@@ -129,10 +74,6 @@ function withCurrentModel(options: string[], current?: string) {
   return [current, ...options];
 }
 
-function defaultThresholdInput(value: number) {
-  if (!Number.isFinite(value)) return "0.92";
-  return String(value);
-}
 
 function ToggleStatusLabel({ enabled, isZh }: { enabled: boolean; isZh: boolean }) {
   return (
@@ -403,13 +344,6 @@ export default function RoutesPage() {
     queryKey: ["providers"],
     queryFn: () => backend("get_providers"),
   });
-  const { data: cacheSettings } = useQuery<CacheSettings>({
-    queryKey: ["cache-settings"],
-    queryFn: () => backend("get_cache_settings"),
-  });
-  const globalSemanticThreshold = cacheSettings?.semantic?.similarity_threshold ?? 0.92;
-  const globalExactCacheEnabled = cacheSettings?.exact?.enabled ?? false;
-  const globalSemanticCacheEnabled = cacheSettings?.semantic?.enabled ?? false;
 
   const createMut = useMutation({
     mutationFn: (input: CreateRoute) => backend("create_route", { input }),
@@ -459,10 +393,6 @@ export default function RoutesPage() {
     () => new Map(providers.map((p) => [p.id, p])),
     [providers],
   );
-  const embeddingProviderOptions = useMemo(
-    () => providerOptions.filter((option) => providerSupportsOpenAiEndpoint(option.provider)),
-    [providerOptions],
-  );
 
   const totalPages = Math.max(1, Math.ceil(routes.length / PAGE_SIZE));
   const pagedRoutes = routes.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
@@ -488,17 +418,8 @@ export default function RoutesPage() {
       name: route.name,
       virtual_model: route.virtual_model,
       strategy: route.strategy ?? "weighted",
-      route_type: route.route_type === "embedding" ? "embedding" : "chat",
       targets,
       access_control: route.access_control,
-      cache_exact_enabled: route.route_type === "embedding" ? false : Boolean(route.cache?.exact),
-      cache_semantic_enabled: route.route_type === "embedding" ? false : Boolean(route.cache?.semantic),
-      cache_semantic_threshold:
-        route.route_type === "embedding"
-          ? ""
-          : route.cache?.semantic?.threshold != null
-          ? String(route.cache.semantic.threshold)
-          : (route.cache?.semantic ? defaultThresholdInput(globalSemanticThreshold) : ""),
     });
   }
 
@@ -519,27 +440,6 @@ export default function RoutesPage() {
     });
   }
 
-  function updateCreateSemanticEnabled(enabled: boolean) {
-    setCreateForm((prev) => ({
-      ...prev,
-      cache_semantic_enabled: enabled,
-      cache_semantic_threshold: enabled
-        ? (prev.cache_semantic_threshold.trim() || defaultThresholdInput(globalSemanticThreshold))
-        : prev.cache_semantic_threshold,
-    }));
-  }
-
-  function updateEditSemanticEnabled(enabled: boolean) {
-    setEditForm((prev) => (prev
-      ? {
-        ...prev,
-        cache_semantic_enabled: enabled,
-        cache_semantic_threshold: enabled
-          ? (prev.cache_semantic_threshold.trim() || defaultThresholdInput(globalSemanticThreshold))
-          : prev.cache_semantic_threshold,
-      }
-      : prev));
-  }
 
   function addCreateTarget() {
     setCreateForm((prev) => ({
@@ -611,30 +511,6 @@ export default function RoutesPage() {
               />
             </div>
             <div className="space-y-2">
-              <FieldLabel>{isZh ? "路由类型" : "Route Type"}</FieldLabel>
-              <Select
-                value={createForm.route_type}
-                onValueChange={(value: "chat" | "embedding") =>
-                  setCreateForm((prev) => ({
-                    ...prev,
-                    route_type: value,
-                    targets: normalizeTargetsForRouteType(value, prev.targets, providerMap),
-                    cache_exact_enabled: value === "embedding" ? false : prev.cache_exact_enabled,
-                    cache_semantic_enabled: value === "embedding" ? false : prev.cache_semantic_enabled,
-                    cache_semantic_threshold: value === "embedding" ? "" : prev.cache_semantic_threshold,
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="chat">{isZh ? "对话路由" : "Chat"}</SelectItem>
-                  <SelectItem value="embedding">{isZh ? "向量路由" : "Embedding"}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
               <FieldLabel>{isZh ? "负载策略" : "Load Strategy"}</FieldLabel>
               <Select
                 value={createForm.strategy}
@@ -667,18 +543,13 @@ export default function RoutesPage() {
                     target={target}
                     strategy={createForm.strategy}
                     isZh={isZh}
-                    providerOptions={createForm.route_type === "embedding" ? embeddingProviderOptions : providerOptions}
+                    providerOptions={providerOptions}
                     providerMap={providerMap}
                     onUpdate={updateCreateTarget}
                     onRemove={removeCreateTarget}
                     disableRemove={createForm.targets.length <= 1}
                   />
                 ))}
-                {createForm.route_type === "embedding" && embeddingProviderOptions.length === 0 && (
-                  <p className="px-1 text-xs text-amber-600">
-                    {isZh ? "没有可用的 OpenAI 协议提供商，无法配置向量路由目标。" : "No providers with OpenAI endpoints are available for embedding routes."}
-                  </p>
-                )}
                 <Button
                   type="button"
                   variant="secondary"
@@ -699,44 +570,6 @@ export default function RoutesPage() {
               switchId="create-route-access-control"
               onCheckedChange={(checked) => setCreateForm((prev) => ({ ...prev, access_control: checked }))}
             />
-            {createForm.route_type !== "embedding" && (
-              <>
-                {globalExactCacheEnabled && (
-                  <RouteToggleControl
-                    title={isZh ? "精确匹配缓存" : "Exact Cache"}
-                    isZh={isZh}
-                    checked={createForm.cache_exact_enabled}
-                    onCheckedChange={(checked) => setCreateForm((prev) => ({ ...prev, cache_exact_enabled: checked }))}
-                  />
-                )}
-                {globalSemanticCacheEnabled && (
-                  <>
-                    <RouteToggleControl
-                      title={isZh ? "语义相似缓存" : "Semantic Cache"}
-                      isZh={isZh}
-                      checked={createForm.cache_semantic_enabled}
-                      onCheckedChange={(checked) => updateCreateSemanticEnabled(checked)}
-                    />
-                    {createForm.cache_semantic_enabled && (
-                      <div className="space-y-2">
-                        <FieldLabel>{isZh ? "语义相似度" : "Semantic Threshold"}</FieldLabel>
-                        <Input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          max={1}
-                          value={createForm.cache_semantic_threshold}
-                          onChange={(e) =>
-                            setCreateForm((prev) => ({ ...prev, cache_semantic_threshold: e.target.value }))
-                          }
-                          placeholder={defaultThresholdInput(globalSemanticThreshold)}
-                        />
-                      </div>
-                    )}
-                  </>
-                )}
-              </>
-            )}
           </div>
           <div className="flex gap-3">
             <Button
@@ -811,32 +644,6 @@ export default function RoutesPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <FieldLabel>{isZh ? "路由类型" : "Route Type"}</FieldLabel>
-                      <Select
-                        value={editForm.route_type}
-                        onValueChange={(value: "chat" | "embedding") =>
-                          setEditForm((prev) => (prev
-                            ? {
-                              ...prev,
-                              route_type: value,
-                              targets: normalizeTargetsForRouteType(value, prev.targets, providerMap),
-                              cache_exact_enabled: value === "embedding" ? false : prev.cache_exact_enabled,
-                              cache_semantic_enabled: value === "embedding" ? false : prev.cache_semantic_enabled,
-                              cache_semantic_threshold: value === "embedding" ? "" : prev.cache_semantic_threshold,
-                            }
-                            : prev))
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="chat">{isZh ? "对话路由" : "Chat"}</SelectItem>
-                          <SelectItem value="embedding">{isZh ? "向量路由" : "Embedding"}</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
                       <FieldLabel>{isZh ? "负载策略" : "Load Strategy"}</FieldLabel>
                       <Select
                         value={editForm.strategy}
@@ -869,18 +676,13 @@ export default function RoutesPage() {
                             target={target}
                             strategy={editForm.strategy}
                             isZh={isZh}
-                            providerOptions={editForm.route_type === "embedding" ? embeddingProviderOptions : providerOptions}
+                            providerOptions={providerOptions}
                             providerMap={providerMap}
                             onUpdate={updateEditTarget}
                             onRemove={removeEditTarget}
                             disableRemove={editForm.targets.length <= 1}
                           />
                         ))}
-                        {editForm.route_type === "embedding" && embeddingProviderOptions.length === 0 && (
-                          <p className="px-1 text-xs text-amber-600">
-                            {isZh ? "没有可用的 OpenAI 协议提供商，无法配置向量路由目标。" : "No providers with OpenAI endpoints are available for embedding routes."}
-                          </p>
-                        )}
                         <Button
                           type="button"
                           variant="secondary"
@@ -902,48 +704,6 @@ export default function RoutesPage() {
                         setEditForm((prev) => (prev ? { ...prev, access_control: checked } : prev))
                       }
                     />
-                    {editForm.route_type !== "embedding" && (
-                      <>
-                        {globalExactCacheEnabled && (
-                          <RouteToggleControl
-                            title={isZh ? "精确匹配缓存" : "Exact Cache"}
-                            isZh={isZh}
-                            checked={editForm.cache_exact_enabled}
-                            onCheckedChange={(checked) =>
-                              setEditForm((prev) => (prev ? { ...prev, cache_exact_enabled: checked } : prev))
-                            }
-                          />
-                        )}
-                        {globalSemanticCacheEnabled && (
-                          <>
-                            <RouteToggleControl
-                              title={isZh ? "语义相似缓存" : "Semantic Cache"}
-                              isZh={isZh}
-                              checked={editForm.cache_semantic_enabled}
-                              onCheckedChange={(checked) => updateEditSemanticEnabled(checked)}
-                            />
-                            {editForm.cache_semantic_enabled && (
-                              <div className="space-y-2">
-                                <FieldLabel>{isZh ? "语义相似度" : "Semantic Threshold"}</FieldLabel>
-                                <Input
-                                  type="number"
-                                  step="0.01"
-                                  min={0}
-                                  max={1}
-                                  value={editForm.cache_semantic_threshold}
-                                  onChange={(e) =>
-                                    setEditForm((prev) =>
-                                      prev ? { ...prev, cache_semantic_threshold: e.target.value } : prev
-                                    )
-                                  }
-                                  placeholder={defaultThresholdInput(globalSemanticThreshold)}
-                                />
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </>
-                    )}
                   </div>
                   <div className="flex gap-3">
                     <Button
@@ -998,29 +758,9 @@ export default function RoutesPage() {
                     >
                       {strategyLabel(route.strategy ?? "weighted", isZh)}
                     </Badge>
-                    <Badge
-                      variant="secondary"
-                      className={
-                        route.route_type === "embedding"
-                          ? "connect-label-badge bg-violet-50 text-violet-700"
-                          : "connect-label-badge bg-emerald-50 text-emerald-700"
-                      }
-                    >
-                      {routeTypeLabel(route.route_type === "embedding" ? "embedding" : "chat", isZh)}
-                    </Badge>
                     {route.access_control && (
                       <Badge variant="success" className="connect-label-badge">
                         {isZh ? "鉴权" : "Auth"}
-                      </Badge>
-                    )}
-                    {globalExactCacheEnabled && route.cache?.exact && (
-                      <Badge variant="success" className="connect-label-badge">
-                        {isZh ? "精确匹配缓存" : "Exact Cache"}
-                      </Badge>
-                    )}
-                    {globalSemanticCacheEnabled && route.cache?.semantic && (
-                      <Badge variant="success" className="connect-label-badge">
-                        {isZh ? "语义相似缓存" : "Semantic Cache"}
                       </Badge>
                     )}
                     {!route.is_enabled && (
@@ -1056,22 +796,7 @@ export default function RoutesPage() {
                     <Pencil className="h-4 w-4" />
                   </button>
                   <button
-                    onClick={() => {
-                      if (
-                        route.route_type === "embedding" &&
-                        cacheSettings?.semantic?.enabled &&
-                        cacheSettings.semantic.embedding_route === route.virtual_model
-                      ) {
-                        setErrorDialog({
-                          title: isZh ? "无法删除该路由" : "Cannot delete this route",
-                          description: isZh
-                            ? `该 Embedding 路由「${route.name}」正被系统设置中的语义相似缓存引用，请先在系统设置中关闭语义相似缓存或更换 Embedding 路由后再删除。`
-                            : `The embedding route "${route.name}" is referenced by semantic cache in system settings. Please disable semantic cache or change the embedding route in settings before deleting.`,
-                        });
-                        return;
-                      }
-                      setRouteToDelete(route);
-                    }}
+                    onClick={() => setRouteToDelete(route)}
                     className="cursor-pointer rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
                   >
                     <Trash2 className="h-4 w-4" />
@@ -1172,12 +897,10 @@ function buildCreatePayload(form: RouteForm): CreateRoute {
     name: form.name.trim(),
     virtual_model: form.virtual_model.trim(),
     strategy: form.strategy,
-    route_type: form.route_type,
     targets,
     target_provider: primary.provider_id,
     target_model: primary.model,
     access_control: form.access_control,
-    cache: buildRouteCacheConfig(form),
   };
 }
 
@@ -1194,37 +917,9 @@ function buildUpdatePayload(form: RouteForm & { id: string }): UpdateRoute {
     name: form.name.trim(),
     virtual_model: form.virtual_model.trim(),
     strategy: form.strategy,
-    route_type: form.route_type,
     targets,
     target_provider: primary.provider_id,
     target_model: primary.model,
     access_control: form.access_control,
-    cache: buildRouteCacheConfig(form),
   };
-}
-
-function buildRouteCacheConfig(form: RouteForm): RouteCacheConfig {
-  if (form.route_type === "embedding") {
-    return {};
-  }
-  const cache: RouteCacheConfig = {};
-  const semanticThreshold = parseOptionalFloat(form.cache_semantic_threshold);
-
-  if (form.cache_exact_enabled) {
-    cache.exact = {};
-  }
-  if (form.cache_semantic_enabled) {
-    cache.semantic = {
-      threshold: semanticThreshold ?? undefined,
-    };
-  }
-  return cache;
-}
-
-function parseOptionalFloat(raw: string): number | null {
-  const value = raw.trim();
-  if (!value) return null;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
 }

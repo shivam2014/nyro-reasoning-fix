@@ -1,10 +1,10 @@
 mod commands;
 
-use nyro_core::{config::GatewayConfig, logging, Gateway};
+use nyro_core::{Gateway, config::GatewayConfig, logging};
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
     Manager,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -14,8 +14,15 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
                 let _ = w.set_focus();
             }
         }))
@@ -54,7 +61,8 @@ pub fn run() {
 
             app.manage(gateway);
 
-            setup_tray(app, proxy_port)?;
+            let tray = setup_tray(app, proxy_port)?;
+            app.manage(tray);
 
             Ok(())
         })
@@ -69,6 +77,7 @@ pub fn run() {
             commands::get_provider,
             commands::get_provider_presets,
             commands::create_provider,
+            commands::copy_provider,
             commands::update_provider,
             commands::delete_provider,
             commands::test_provider,
@@ -101,12 +110,6 @@ pub fn run() {
             commands::get_stats_by_provider,
             commands::get_setting,
             commands::set_setting,
-            commands::get_cache_settings,
-            commands::update_cache_settings,
-            commands::detect_embedding_dimensions,
-            commands::flush_cache,
-            commands::delete_cache_key,
-            commands::get_cache_stats,
             commands::get_gateway_status,
             commands::export_config,
             commands::import_config,
@@ -114,11 +117,29 @@ pub fn run() {
             commands::sync_cli_config,
             commands::restore_cli_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
-fn setup_tray(app: &tauri::App, proxy_port: u16) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_tray(app: &tauri::App, proxy_port: u16) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Show Dashboard", true, None::<&str>)?;
     let copy_url = MenuItem::with_id(
         app,
@@ -130,9 +151,24 @@ fn setup_tray(app: &tauri::App, proxy_port: u16) -> Result<(), Box<dyn std::erro
     let quit = MenuItem::with_id(app, "quit", "Quit Nyro", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &copy_url, &quit])?;
 
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
         .tooltip(&format!("Nyro AI Gateway — :{proxy_port}"))
         .menu(&menu)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        })
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
@@ -154,5 +190,5 @@ fn setup_tray(app: &tauri::App, proxy_port: u16) -> Result<(), Box<dyn std::erro
         })
         .build(app)?;
 
-    Ok(())
+    Ok(tray)
 }

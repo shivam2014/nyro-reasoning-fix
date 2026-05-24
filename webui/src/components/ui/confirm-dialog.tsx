@@ -14,6 +14,7 @@ type ConfirmDialogProps = {
   onOpenChange: (open: boolean) => void;
   title: string;
   description?: string;
+  content?: React.ReactNode;
   hideCancel?: boolean;
   cancelText?: string;
   confirmText?: string;
@@ -26,6 +27,7 @@ function ConfirmDialog({
   onOpenChange,
   title,
   description,
+  content,
   hideCancel = false,
   cancelText = "Cancel",
   confirmText = "Confirm",
@@ -39,6 +41,7 @@ function ConfirmDialog({
           <DialogTitle>{title}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
+        {content && <div className="py-2">{content}</div>}
         <DialogFooter>
           {!hideCancel && (
             <Button variant="secondary" onClick={() => onOpenChange(false)}>

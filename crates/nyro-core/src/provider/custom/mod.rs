@@ -6,31 +6,34 @@ use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
-use crate::protocol::types::{InternalRequest, InternalResponse};
-use crate::provider::adapter::{ProviderAdapter, ProviderCtx};
-use crate::provider::common::openai::{
-    openai_compat_build_request, openai_compat_parse_response, openai_compat_stream_parser,
-    openai_map_error, GenericOpenAICompatibleAdapter,
-};
+use crate::protocol::ir::{AiRequest, AiResponse};
+use crate::provider::common::openai::{GenericOpenAICompatibleAdapter, openai_map_error};
+use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
-use crate::provider::metadata::{AuthMode, ChannelDef, Label, VendorMetadata};
+use crate::provider::metadata::{AuthMode, CapabilitiesSource, ChannelDef, Label, VendorMetadata};
 use crate::provider::outbound::OutboundRequest;
-use crate::provider::registry::{ProviderAdapterRegistration, VendorRegistration, VendorScope};
-use crate::provider::stream::ProviderStreamParser;
-use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
+use crate::provider::registry::{VendorRegistration, VendorScope};
+use crate::provider::vendor::{ProviderCtx, Vendor};
+use crate::provider::vendor_ext::VendorCtx;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "custom",
-    label: Label { zh: "自定义", en: "Custom" },
+    label: Label {
+        zh: "自定义",
+        en: "Custom",
+    },
     icon: "custom",
-    default_protocol: "openai",
+    default_protocol: "openai-compatible",
     channels: &[ChannelDef {
         id: "default",
-        label: Label { zh: "默认", en: "Default" },
+        label: Label {
+            zh: "默认",
+            en: "Default",
+        },
         base_urls: &[],
         api_key: None,
         models_source: None,
-        capabilities_source: Some("ai://models.dev/"),
+        capabilities_source: CapabilitiesSource::Auto,
         static_models: &[],
         auth_mode: AuthMode::ApiKey,
         oauth: None,
@@ -40,33 +43,52 @@ const METADATA: VendorMetadata = VendorMetadata {
 
 pub struct CustomVendor;
 
-impl VendorExtension for CustomVendor {
-    fn scope(&self) -> VendorScope { VendorScope::Vendor { vendor_id: "custom" } }
-    fn metadata(&self) -> Option<&'static VendorMetadata> { Some(&METADATA) }
+#[async_trait]
+impl Vendor for CustomVendor {
+    fn scope(&self) -> VendorScope {
+        VendorScope::Vendor {
+            vendor_id: "custom",
+        }
+    }
+    fn metadata(&self) -> Option<&'static VendorMetadata> {
+        Some(&METADATA)
+    }
     fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
         GenericOpenAICompatibleAdapter.auth_headers(ctx)
     }
     fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
         GenericOpenAICompatibleAdapter.build_url(ctx, base_url, path)
     }
-}
-
-#[async_trait]
-impl ProviderAdapter for CustomVendor {
-    fn vendor_id(&self) -> &'static str { "custom" }
+    fn vendor_id(&self) -> &'static str {
+        "custom"
+    }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::OPENAI_CHAT_V1;
-        &[OPENAI_CHAT_V1]
+        use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+        &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
     }
-    async fn build_request(&self, req: &mut InternalRequest, ctx: &ProviderCtx<'_>) -> Result<OutboundRequest, GatewayError> {
-        openai_compat_build_request(self, req, ctx).await
+    fn declared_request_mutations(&self) -> bool {
+        false
     }
-    async fn parse_response(&self, resp: InboundResponse, ctx: &ProviderCtx<'_>) -> Result<InternalResponse, GatewayError> {
-        openai_compat_parse_response(self, resp, ctx).await
+    fn declared_response_mutations(&self) -> bool {
+        false
     }
-    fn stream_parser(&self, ctx: &ProviderCtx<'_>) -> Box<dyn ProviderStreamParser + Send> { openai_compat_stream_parser(ctx) }
-    fn map_error(&self, status: u16, body: Value) -> GatewayError { openai_map_error("custom", status, body) }
+    async fn build_request(
+        &self,
+        req: &mut AiRequest,
+        ctx: &ProviderCtx<'_>,
+    ) -> Result<OutboundRequest, GatewayError> {
+        pipeline::build_request(self, req, ctx).await
+    }
+    async fn parse_response(
+        &self,
+        resp: InboundResponse,
+        ctx: &ProviderCtx<'_>,
+    ) -> Result<AiResponse, GatewayError> {
+        pipeline::parse_response(self, resp, ctx).await
+    }
+    fn map_error(&self, status: u16, body: Value) -> GatewayError {
+        openai_map_error("custom", status, body)
+    }
 }
 
 inventory::submit! { VendorRegistration { make: || Box::new(CustomVendor) } }
-inventory::submit! { ProviderAdapterRegistration { make: || Box::new(CustomVendor) } }

@@ -1,6 +1,6 @@
-use crate::protocol::types::InternalResponse;
+use crate::protocol::ir::AiResponse;
 
-pub fn normalize_response_reasoning(resp: &mut InternalResponse) {
+pub fn normalize_response_reasoning(resp: &mut AiResponse) {
     if resp.reasoning_content.is_some() {
         return;
     }
@@ -54,20 +54,11 @@ pub(crate) fn split_think_tags(content: &str) -> (Option<String>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::types::{InternalResponse, TokenUsage};
 
-    fn make_resp(content: &str) -> InternalResponse {
-        InternalResponse {
-            id: String::new(),
-            model: String::new(),
-            content: content.to_string(),
-            reasoning_content: None,
-            reasoning_signature: None,
-            tool_calls: vec![],
-            response_items: None,
-            stop_reason: None,
-            usage: TokenUsage::default(),
-        }
+    fn make_resp(content: &str) -> AiResponse {
+        let mut r = AiResponse::new("", "");
+        r.content = content.to_string();
+        r
     }
 
     #[test]
@@ -86,7 +77,8 @@ mod tests {
 
     #[test]
     fn test_split_think_tags_multiple() {
-        let (reasoning, text) = split_think_tags("<think>step1</think>middle<think>step2</think>end");
+        let (reasoning, text) =
+            split_think_tags("<think>step1</think>middle<think>step2</think>end");
         let r = reasoning.unwrap();
         assert!(r.contains("step1"), "expected step1 in reasoning: {r}");
         assert!(r.contains("step2"), "expected step2 in reasoning: {r}");
@@ -95,10 +87,15 @@ mod tests {
 
     #[test]
     fn test_split_think_tags_unclosed() {
-        // Unclosed <think> is treated as regular text.
         let (reasoning, text) = split_think_tags("<think>incomplete");
-        assert!(reasoning.is_none(), "unclosed think should produce no reasoning");
-        assert!(text.contains("<think>"), "unclosed think tag should remain in text");
+        assert!(
+            reasoning.is_none(),
+            "unclosed think should produce no reasoning"
+        );
+        assert!(
+            text.contains("<think>"),
+            "unclosed think tag should remain in text"
+        );
     }
 
     #[test]
@@ -106,13 +103,14 @@ mod tests {
         let mut resp = make_resp("<think>should be ignored</think>answer");
         resp.reasoning_content = Some("existing reasoning".to_string());
         normalize_response_reasoning(&mut resp);
-        // Must not overwrite existing reasoning_content.
-        assert_eq!(resp.reasoning_content.as_deref(), Some("existing reasoning"));
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("existing reasoning")
+        );
     }
 
     #[test]
     fn test_normalize_response_reasoning_extracts_think_tags() {
-        // DeepSeek-style: reasoning wrapped in <think> tags in the content field.
         let mut resp = make_resp("<think>my reasoning</think>final answer");
         normalize_response_reasoning(&mut resp);
         assert_eq!(resp.reasoning_content.as_deref(), Some("my reasoning"));

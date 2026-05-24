@@ -4,8 +4,6 @@ export interface Provider {
   vendor?: string | null;
   protocol: string;
   base_url: string;
-  default_protocol: string;
-  protocol_endpoints: string;
   api_key?: string;
   use_proxy: boolean;
   auth_mode?: "apikey" | "oauth";
@@ -16,7 +14,6 @@ export interface Provider {
   preset_key?: string | null;
   channel?: string | null;
   models_source?: string | null;
-  capabilities_source?: string | null;
   static_models?: string | null;
   is_enabled: boolean;
   created_at: string;
@@ -31,8 +28,6 @@ export interface Route {
   target_provider: string;
   target_model: string;
   access_control: boolean;
-  route_type?: "chat" | "embedding";
-  cache?: RouteCacheConfig;
   is_enabled: boolean;
   created_at: string;
   targets: RouteTarget[];
@@ -67,26 +62,45 @@ export interface ApiKey {
 
 export interface RequestLog {
   id: string;
-  created_at: string;
-  ingress_protocol?: string;
-  egress_protocol?: string;
-  request_model?: string;
-  actual_model?: string;
+  /** Unix 毫秒时间戳 */
+  created_at: number;
+  api_key_id?: string;
+  api_key_name?: string;
+
+  client_protocol?: string;
+  upstream_protocol?: string;
+  provider_id?: string;
   provider_name?: string;
-  status_code?: number;
-  duration_ms?: number;
-  input_tokens: number;
-  output_tokens: number;
-  is_stream: boolean;
-  is_tool_call: boolean;
-  error_message?: string;
-  response_preview?: string;
+  route_id?: string;
+  route_name?: string;
+  upstream_url?: string;
+  client_model?: string;
+  upstream_model?: string;
+
   method?: string;
   path?: string;
-  request_headers?: string;
-  request_body?: string;
-  response_headers?: string;
-  response_body?: string;
+
+  client_request_headers?: string;
+  client_request_body?: string;
+  client_response_headers?: string;
+  client_response_body?: string;
+
+  upstream_request_headers?: string;
+  upstream_request_body?: string;
+  upstream_response_headers?: string;
+  upstream_response_body?: string;
+
+  upstream_status_code?: number;
+  client_status_code?: number;
+
+  latency_total_ms?: number;
+  latency_upstream_ms?: number;
+  input_tokens: number;
+  output_tokens: number;
+
+  is_stream: boolean;
+  stream_chunks_count: number;
+  stream_first_chunk_ms?: number;
 }
 
 export function getRouteType(log: Pick<RequestLog, "path">): "chat" | "embedding" {
@@ -154,10 +168,10 @@ export interface ModelCapabilities {
 }
 
 export type ProviderProtocol =
-  | "openai"
-  | "openai_responses"
-  | "anthropic"
-  | "gemini";
+  | "openai-compatible"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "google-gemini";
 
 export interface ProviderChannelPreset {
   id: string;
@@ -166,9 +180,8 @@ export interface ProviderChannelPreset {
     en: string;
   };
   authMode?: "apikey" | "oauth";
-  baseUrls: Partial<Record<ProviderProtocol, string>>;
+  baseUrls: Record<string, string>;
   modelsSource?: string;
-  capabilitiesSource?: string;
   apiKey?: string;
   modelsEndpoint?: string;
   staticModels?: string[];
@@ -181,7 +194,7 @@ export interface ProviderPreset {
     en: string;
   };
   icon?: string;
-  defaultProtocol: ProviderProtocol;
+  defaultProtocol: string;
   channels?: ProviderChannelPreset[];
 }
 
@@ -190,14 +203,11 @@ export interface CreateProvider {
   vendor?: string;
   protocol: string;
   base_url: string;
-  default_protocol?: string;
-  protocol_endpoints?: string;
   use_proxy?: boolean;
   auth_mode?: "apikey" | "oauth";
   preset_key?: string;
   channel?: string;
   models_source?: string;
-  capabilities_source?: string;
   static_models?: string;
   api_key: string;
 }
@@ -207,14 +217,11 @@ export interface UpdateProvider {
   vendor?: string;
   protocol?: string;
   base_url?: string;
-  default_protocol?: string;
-  protocol_endpoints?: string;
   use_proxy?: boolean;
   auth_mode?: "apikey" | "oauth";
   preset_key?: string;
   channel?: string;
   models_source?: string;
-  capabilities_source?: string;
   static_models?: string;
   api_key?: string;
   is_enabled?: boolean;
@@ -228,8 +235,6 @@ export interface CreateRoute {
   target_model: string;
   targets?: CreateRouteTarget[];
   access_control?: boolean;
-  route_type?: "chat" | "embedding";
-  cache?: RouteCacheConfig | null;
 }
 
 export interface UpdateRoute {
@@ -240,43 +245,7 @@ export interface UpdateRoute {
   target_model?: string;
   targets?: UpsertRouteTarget[];
   access_control?: boolean;
-  route_type?: "chat" | "embedding";
-  cache?: RouteCacheConfig | null;
   is_enabled?: boolean;
-}
-
-export interface RouteCacheConfig {
-  exact?: RouteExactCacheConfig;
-  semantic?: RouteSemanticCacheConfig;
-}
-
-export interface RouteExactCacheConfig {
-  ttl?: number | null;
-}
-
-export interface RouteSemanticCacheConfig {
-  ttl?: number | null;
-  threshold?: number | null;
-}
-
-export interface CacheSettings {
-  exact: {
-    enabled: boolean;
-    default_ttl: number;
-    max_entries: number;
-    stream_replay_tps: number;
-    expose_headers: boolean;
-  };
-  semantic: {
-    enabled: boolean;
-    embedding_route: string;
-    similarity_threshold: number;
-    vector_dimensions: number;
-    default_ttl: number;
-    max_entries: number;
-    stream_replay_tps: number;
-    expose_headers: boolean;
-  };
 }
 
 export interface CreateRouteTarget {
@@ -335,13 +304,10 @@ export interface ExportProvider {
   vendor?: string | null;
   protocol: string;
   base_url: string;
-  default_protocol?: string;
-  protocol_endpoints?: string;
   use_proxy: boolean;
   preset_key?: string | null;
   channel?: string | null;
   models_source?: string | null;
-  capabilities_source?: string | null;
   static_models?: string | null;
   api_key: string;
   is_enabled: boolean;

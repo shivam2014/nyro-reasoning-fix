@@ -58,57 +58,13 @@ impl ProtocolKind {
             ProtocolKind::OpenAiResponses => ("/responses".to_string(), None),
             ProtocolKind::AnthropicMessages => ("/messages".to_string(), None),
             ProtocolKind::GoogleContent => {
-                let action = if stream { "streamGenerateContent" } else { "generateContent" };
+                let action = if stream {
+                    "streamGenerateContent"
+                } else {
+                    "generateContent"
+                };
                 let query = stream.then(|| "alt=sse".to_string());
                 (format!("/models/{real_model}:{action}"), query)
-            }
-        }
-    }
-
-    /// Strip the protocol's standard version prefix from an incoming client path.
-    /// Used by `proxy` to convert what an OpenAI/Anthropic/Google SDK actually sends
-    /// (e.g. `/v1/chat/completions`) into the suffix expected by the user-supplied
-    /// versioned `--upstream-endpoint` (e.g. `/chat/completions`).
-    pub fn strip_client_version_prefix(self, client_path: &str) -> Result<String> {
-        match self {
-            ProtocolKind::OpenAiChat => {
-                if client_path == "/v1/chat/completions" {
-                    Ok("/chat/completions".to_string())
-                } else {
-                    bail!(
-                        "openai-chat client path must be `/v1/chat/completions`, got `{client_path}`"
-                    )
-                }
-            }
-            ProtocolKind::OpenAiResponses => {
-                if client_path == "/v1/responses" {
-                    Ok("/responses".to_string())
-                } else {
-                    bail!("openai-responses client path must be `/v1/responses`, got `{client_path}`")
-                }
-            }
-            ProtocolKind::AnthropicMessages => {
-                if client_path == "/v1/messages" {
-                    Ok("/messages".to_string())
-                } else {
-                    bail!(
-                        "anthropic-messages client path must be `/v1/messages`, got `{client_path}`"
-                    )
-                }
-            }
-            ProtocolKind::GoogleContent => {
-                const PREFIX: &str = "/v1beta";
-                let rest = client_path.strip_prefix(PREFIX).with_context(|| {
-                    format!(
-                        "google-content client path must start with `{PREFIX}/models/...`, got `{client_path}`"
-                    )
-                })?;
-                if !rest.starts_with("/models/") {
-                    bail!(
-                        "google-content client path must continue with `/models/...`, got `{client_path}`"
-                    );
-                }
-                Ok(rest.to_string())
             }
         }
     }
@@ -165,7 +121,9 @@ fn parse_google_content_model(path: &str) -> Result<String> {
         bail!("google-content path has empty model segment: {path}");
     }
     if !matches!(action, "generateContent" | "streamGenerateContent") {
-        bail!("google-content path has unsupported action `{action}` (expected generateContent or streamGenerateContent)");
+        bail!(
+            "google-content path has unsupported action `{action}` (expected generateContent or streamGenerateContent)"
+        );
     }
     Ok(model.to_owned())
 }
@@ -199,7 +157,8 @@ mod tests {
     #[test]
     fn extract_model_from_google_path() {
         for action in ["generateContent", "streamGenerateContent"] {
-            let path = format!("/v1beta/models/google-aistudio--google-content--basic-stream:{action}");
+            let path =
+                format!("/v1beta/models/google-aistudio--google-content--basic-stream:{action}");
             let m = ProtocolKind::GoogleContent
                 .extract_request_model(&path, &serde_json::json!({}))
                 .unwrap();
@@ -239,64 +198,6 @@ mod tests {
         let (p, q) = ProtocolKind::GoogleContent.record_path_suffix(false, "gemini-2.0-flash");
         assert_eq!(p, "/models/gemini-2.0-flash:generateContent");
         assert!(q.is_none());
-    }
-
-    #[test]
-    fn strip_client_version_prefix_happy_path() {
-        assert_eq!(
-            ProtocolKind::OpenAiChat
-                .strip_client_version_prefix("/v1/chat/completions")
-                .unwrap(),
-            "/chat/completions"
-        );
-        assert_eq!(
-            ProtocolKind::OpenAiResponses
-                .strip_client_version_prefix("/v1/responses")
-                .unwrap(),
-            "/responses"
-        );
-        assert_eq!(
-            ProtocolKind::AnthropicMessages
-                .strip_client_version_prefix("/v1/messages")
-                .unwrap(),
-            "/messages"
-        );
-        assert_eq!(
-            ProtocolKind::GoogleContent
-                .strip_client_version_prefix("/v1beta/models/x:generateContent")
-                .unwrap(),
-            "/models/x:generateContent"
-        );
-        assert_eq!(
-            ProtocolKind::GoogleContent
-                .strip_client_version_prefix("/v1beta/models/x:streamGenerateContent")
-                .unwrap(),
-            "/models/x:streamGenerateContent"
-        );
-    }
-
-    #[test]
-    fn strip_client_version_prefix_rejects_garbage() {
-        assert!(
-            ProtocolKind::OpenAiChat
-                .strip_client_version_prefix("/v2/chat/completions")
-                .is_err()
-        );
-        assert!(
-            ProtocolKind::AnthropicMessages
-                .strip_client_version_prefix("/messages")
-                .is_err()
-        );
-        assert!(
-            ProtocolKind::GoogleContent
-                .strip_client_version_prefix("/v1/models/x:generateContent")
-                .is_err()
-        );
-        assert!(
-            ProtocolKind::GoogleContent
-                .strip_client_version_prefix("/v1beta/foo/x:generateContent")
-                .is_err()
-        );
     }
 
     #[test]

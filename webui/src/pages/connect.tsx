@@ -17,7 +17,7 @@ const CodeHighlighter = lazy(() => import("@/components/ui/code-highlighter"));
 
 type CodeLanguage = "python" | "typescript" | "curl";
 type CliToolId = "claude-code" | "codex-cli" | "gemini-cli" | "opencode";
-type GatewayProtocol = "openai" | "anthropic" | "gemini";
+type GatewayProtocol = "openai-compatible" | "anthropic-messages" | "google-gemini";
 type CodeProtocol = GatewayProtocol;
 type RouteKind = "chat" | "embedding";
 
@@ -41,37 +41,37 @@ const CLI_TOOLS: CliTool[] = [
     id: "claude-code",
     name: "Claude Code",
     iconKey: "claude",
-    protocol: "anthropic",
+    protocol: "anthropic-messages",
     desc: { zh: "Anthropic 官方命令行编程助手", en: "Anthropic official coding CLI assistant" },
   },
   {
     id: "codex-cli",
     name: "Codex CLI",
     iconKey: "openai",
-    protocol: "openai",
+    protocol: "openai-compatible",
     desc: { zh: "OpenAI 命令行编程工具", en: "OpenAI coding CLI tool" },
   },
   {
     id: "gemini-cli",
     name: "Gemini CLI",
     iconKey: "gemini",
-    protocol: "gemini",
+    protocol: "google-gemini",
     desc: { zh: "Google Gemini 命令行工具", en: "Google Gemini command line tool" },
   },
   {
     id: "opencode",
     name: "OpenCode",
     iconKey: "opencode-logo-light",
-    protocol: "openai",
+    protocol: "openai-compatible",
     desc: { zh: "开源 AI 编程命令行工具", en: "Open-source AI coding CLI tool" },
   },
 ];
 
 const CODE_LANGS: CodeLanguage[] = ["python", "typescript", "curl"];
 const CODE_PROTOCOLS: CodeProtocolOption[] = [
-  { id: "openai", name: "OpenAI", iconKey: "openai", apiPath: "/v1/chat/completions" },
-  { id: "anthropic", name: "Anthropic", iconKey: "anthropic", apiPath: "/v1/messages" },
-  { id: "gemini", name: "Gemini", iconKey: "gemini", apiPath: "/v1beta/models/{model}:generateContent" },
+  { id: "openai-compatible", name: "OpenAI Compatible", iconKey: "openai", apiPath: "/v1/chat/completions" },
+  { id: "anthropic-messages", name: "Anthropic Messages", iconKey: "anthropic", apiPath: "/v1/messages" },
+  { id: "google-gemini", name: "Google Gemini", iconKey: "gemini", apiPath: "/v1beta/models/{model}:generateContent" },
 ];
 const OPTIONAL_KEY_PLACEHOLDER = "sk-00000000000000000000000000000000";
 const UNSELECTED_KEY_PLACEHOLDER = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
@@ -82,35 +82,20 @@ function maskApiKey(key: string) {
   return `${key.slice(0, 12)}••`;
 }
 
-function protocolLabel(protocol: GatewayProtocol, isZh: boolean) {
-  if (isZh) {
-    if (protocol === "openai") return "OpenAI";
-    if (protocol === "anthropic") return "Anthropic";
-    return "Gemini";
-  }
-  if (protocol === "openai") return "OpenAI";
-  if (protocol === "anthropic") return "Anthropic";
-  return "Gemini";
+function protocolLabel(protocol: GatewayProtocol, _isZh: boolean) {
+  if (protocol === "openai-compatible") return "OpenAI Compatible";
+  if (protocol === "anthropic-messages") return "Anthropic Messages";
+  return "Google Gemini";
 }
 
 function protocolApiPath(protocol: CodeProtocol) {
-  if (protocol === "openai") return "/v1/chat/completions";
-  if (protocol === "anthropic") return "/v1/messages";
+  if (protocol === "openai-compatible") return "/v1/chat/completions";
+  if (protocol === "anthropic-messages") return "/v1/messages";
   return "/v1beta/models/{model}:generateContent";
 }
 
-function protocolApiPathForRoute(protocol: CodeProtocol, routeType: RouteKind) {
-  if (routeType === "embedding") return "/v1/embeddings";
+function protocolApiPathForRoute(protocol: CodeProtocol, _routeType: RouteKind) {
   return protocolApiPath(protocol);
-}
-
-function normalizeRouteType(routeType?: string): RouteKind {
-  return routeType === "embedding" ? "embedding" : "chat";
-}
-
-function routeTypeLabel(routeType: RouteKind, isZh: boolean) {
-  if (routeType === "embedding") return isZh ? "向量路由" : "Embedding";
-  return isZh ? "对话路由" : "Chat";
 }
 
 function jsonText(input: unknown) {
@@ -175,7 +160,7 @@ return response.data[0].embedding;`;
   }
 
   if (language === "curl") {
-    if (protocol === "openai") {
+    if (protocol === "openai-compatible") {
       return `curl ${host}/v1/chat/completions \\
   -H "Authorization: Bearer ${apiKey}" \\
   -H "Content-Type: application/json" \\
@@ -184,7 +169,7 @@ return response.data[0].embedding;`;
     messages: [{ role: "user", content: "Hello" }],
   })}'`;
     }
-    if (protocol === "anthropic") {
+    if (protocol === "anthropic-messages") {
       return `curl ${host}/v1/messages \\
   -H "x-api-key: ${apiKey}" \\
   -H "anthropic-version: 2023-06-01" \\
@@ -204,7 +189,7 @@ return response.data[0].embedding;`;
   }
 
   if (language === "python") {
-    if (protocol === "openai") {
+    if (protocol === "openai-compatible") {
       return `# pip install openai
 from openai import OpenAI
 
@@ -220,7 +205,7 @@ response = client.chat.completions.create(
 
 print(response.choices[0].message.content)`;
     }
-    if (protocol === "anthropic") {
+    if (protocol === "anthropic-messages") {
       return `# pip install anthropic
 from anthropic import Anthropic
 
@@ -253,7 +238,7 @@ response = client.models.generate_content(
 print(response.text)`;
   }
 
-  if (protocol === "openai") {
+  if (protocol === "openai-compatible") {
     return `// npm install openai
 import OpenAI from "openai";
 
@@ -270,7 +255,7 @@ const response = await client.chat.completions.create({
 const content = response.choices[0]?.message?.content;
 return content;`;
   }
-  if (protocol === "anthropic") {
+  if (protocol === "anthropic-messages") {
     return `// npm install @anthropic-ai/sdk
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -414,7 +399,7 @@ export default function ConnectPage() {
 
   const [tab, setTab] = useState<"code" | "cli">("cli");
   const [codeLang, setCodeLang] = useState<CodeLanguage>("python");
-  const [selectedCodeProtocol, setSelectedCodeProtocol] = useState<CodeProtocol>("openai");
+  const [selectedCodeProtocol, setSelectedCodeProtocol] = useState<CodeProtocol>("openai-compatible");
   const [selectedCodeRouteId, setSelectedCodeRouteId] = useState("");
   const [selectedCliRouteId, setSelectedCliRouteId] = useState("");
   const [selectedCodeKeyId, setSelectedCodeKeyId] = useState("");
@@ -508,10 +493,7 @@ export default function ConnectPage() {
     [],
   );
 
-  const codeRoutes = useMemo(() => {
-    if (selectedCodeProtocol === "openai") return routes;
-    return routes.filter((route) => normalizeRouteType(route.route_type) === "chat");
-  }, [routes, selectedCodeProtocol]);
+  const codeRoutes = routes;
 
   useEffect(() => {
     if (selectedCodeRouteId && !codeRoutes.some((route) => route.id === selectedCodeRouteId)) {
@@ -550,15 +532,12 @@ export default function ConnectPage() {
   const hasProxyPort = typeof proxyPort === "number" && Number.isFinite(proxyPort) && proxyPort > 0;
   const host = hasProxyPort ? `http://localhost:${proxyPort}` : "http://localhost:<proxy-port>";
   const codeModel = selectedRoute?.virtual_model ?? "gpt-4o";
-  const codeRouteType: RouteKind = normalizeRouteType(selectedRoute?.route_type);
+  const codeRouteType: RouteKind = "chat";
   const codeProtocol = selectedCodeProtocol;
   const selectedCliTool =
     CLI_TOOLS.find((tool) => tool.id === selectedCliToolId) ?? CLI_TOOLS.find((tool) => tool.id === "claude-code")!;
   const selectedCliReady = IS_TAURI ? Boolean(cliReadyStatus[selectedCliTool.id]) : true;
-  const cliRoutes = useMemo(
-    () => routes.filter((route) => normalizeRouteType(route.route_type) === "chat"),
-    [routes],
-  );
+  const cliRoutes = routes;
   const selectedCliRoute = useMemo(
     () => cliRoutes.find((route) => route.id === selectedCliRouteId) ?? null,
     [cliRoutes, selectedCliRouteId],
@@ -866,12 +845,12 @@ export default function ConnectPage() {
                       }}
                     options={cliRoutes.map((route) => ({
                       value: route.id,
-                      label: `${route.name} · ${route.virtual_model} · ${routeTypeLabel(normalizeRouteType(route.route_type), isZh)}`,
+                      label: `${route.name} · ${route.virtual_model}`,
                     }))}
                     placeholder={
                       cliRoutes.length > 0
                         ? (isZh ? "选择路由" : "Select route")
-                        : (isZh ? "请先创建对话路由" : "Create a chat route first")
+                        : (isZh ? "请先创建路由" : "Create a route first")
                     }
                     searchPlaceholder={isZh ? "搜索路由..." : "Search routes..."}
                     emptyText={isZh ? "暂无可选路由" : "No routes available"}
@@ -1098,14 +1077,12 @@ export default function ConnectPage() {
                     onValueChange={setSelectedCodeRouteId}
                     options={codeRoutes.map((route) => ({
                       value: route.id,
-                      label: `${route.name} · ${route.virtual_model} · ${routeTypeLabel(normalizeRouteType(route.route_type), isZh)}`,
+                      label: `${route.name} · ${route.virtual_model}`,
                     }))}
                     placeholder={
                       codeRoutes.length > 0
                         ? (isZh ? "选择路由" : "Select route")
-                        : selectedCodeProtocol === "openai"
-                          ? (isZh ? "请先创建路由" : "Create route first")
-                          : (isZh ? "请先创建对话路由" : "Create a chat route first")
+                        : (isZh ? "请先创建路由" : "Create a route first")
                     }
                     searchPlaceholder={isZh ? "搜索路由..." : "Search routes..."}
                     emptyText={isZh ? "暂无可选路由" : "No routes available"}

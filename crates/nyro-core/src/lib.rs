@@ -1,10 +1,10 @@
-pub mod auth;
 pub mod admin;
-pub mod cache;
+pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod integrations;
 pub mod logging;
 pub mod protocol;
 pub mod provider;
@@ -17,21 +17,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use dashmap::DashMap;
 use sqlx::{Pool, Postgres, SqlitePool};
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use crate::auth::types::AuthSession;
-use crate::cache::{
-    CacheBackend, CacheConfig, DatabaseCacheBackend, InMemoryCacheBackend, MemoryVectorStore,
-    PgVectorStore, SqliteVecVectorStore, VectorStore,
-};
 use crate::router::health::HealthRegistry;
 use config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
 use logging::LogEntry;
 use storage::sql::config::SqlBackendConfig;
-use storage::postgres::recreate_pg_vector_table;
 use storage::{DynStorage, PostgresStorage, SqliteStorage};
 
 #[derive(Clone, Debug)]
@@ -58,12 +51,10 @@ pub struct Gateway {
     pub health_registry: Arc<HealthRegistry>,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
     pub log_tx: mpsc::Sender<LogEntry>,
-    pub runtime_cache_config: Arc<tokio::sync::RwLock<CacheConfig>>,
-    pub cache_backend: Arc<tokio::sync::RwLock<Option<Arc<dyn CacheBackend>>>>,
-    pub vector_store: Arc<tokio::sync::RwLock<Option<Arc<dyn VectorStore>>>>,
-    pub cache_in_flight: Arc<DashMap<String, broadcast::Sender<Vec<u8>>>>,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
+    #[allow(dead_code)]
     sqlite_pool: Option<SqlitePool>,
+    #[allow(dead_code)]
     postgres_pool: Option<Pool<Postgres>>,
 }
 
@@ -86,10 +77,7 @@ impl Gateway {
                     SqliteStorage::from_config(&config).await?
                 } else {
                     let pool = db::init_pool(&config.data_dir).await?;
-                    SqliteStorage::from_pool_with_dimensions(
-                        pool,
-                        config.cache.semantic.vector_dimensions,
-                    )
+                    SqliteStorage::from_pool(pool)
                 };
                 let pool = sqlite_storage.pool().clone();
                 (
@@ -101,11 +89,7 @@ impl Gateway {
             }
             StorageBackendKind::Postgres => {
                 let backend_config = to_sql_backend_config(&config.storage.postgres, "postgres")?;
-                let postgres_storage = PostgresStorage::connect_with_vector_dimensions(
-                    backend_config,
-                    config.cache.semantic.vector_dimensions,
-                )
-                .await?;
+                let postgres_storage = PostgresStorage::connect(backend_config).await?;
                 let pool = postgres_storage.pool().clone();
                 (
                     RuntimeStorageKind::Postgres,
@@ -152,7 +136,6 @@ impl Gateway {
         ));
         let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let bootstrap_cache = config.cache.clone();
 
         let (log_tx, log_rx) = mpsc::channel(1024);
 
@@ -166,24 +149,10 @@ impl Gateway {
             health_registry,
             ollama_capability_cache,
             log_tx,
-            runtime_cache_config: Arc::new(tokio::sync::RwLock::new(bootstrap_cache)),
-            cache_backend: Arc::new(tokio::sync::RwLock::new(None)),
-            vector_store: Arc::new(tokio::sync::RwLock::new(None)),
-            cache_in_flight: Arc::new(DashMap::new()),
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sqlite_pool,
             postgres_pool,
         };
-
-        let runtime_cache = gw
-            .storage
-            .settings()
-            .get("cache_settings")
-            .await?
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|value| CacheConfig::from_admin_json(&value))
-            .unwrap_or_else(|| gw.config.cache.clone());
-        gw.reload_cache_runtime(runtime_cache).await?;
 
         {
             let data_dir = gw.config.data_dir.clone();
@@ -209,141 +178,7 @@ impl Gateway {
             });
         }
 
-        // Memory vector store is ephemeral across restarts; no fingerprint check needed.
-
         Ok((gw, log_rx))
-    }
-
-    pub async fn effective_cache_config(&self) -> CacheConfig {
-        self.runtime_cache_config.read().await.clone()
-    }
-
-    pub async fn reload_cache_runtime(&self, mut next: CacheConfig) -> anyhow::Result<()> {
-        let current = self.runtime_cache_config.read().await.clone();
-
-        let exact_needs_rebuild = current.exact.enabled != next.exact.enabled
-            || current.exact.max_entries != next.exact.max_entries;
-        let next_cache_backend: Option<Arc<dyn CacheBackend>> = if exact_needs_rebuild {
-            if next.exact.enabled {
-                match self.storage_kind {
-                    RuntimeStorageKind::Memory => {
-                        Some(Arc::new(InMemoryCacheBackend::new(next.exact.max_entries)))
-                    }
-                    RuntimeStorageKind::Sqlite | RuntimeStorageKind::Postgres => {
-                        Some(Arc::new(DatabaseCacheBackend::new(self.storage.clone())))
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            self.cache_backend.read().await.clone()
-        };
-
-        let semantic_needs_rebuild = current.semantic.enabled != next.semantic.enabled
-            || current.semantic.max_entries != next.semantic.max_entries
-            || current.semantic.embedding_route != next.semantic.embedding_route
-            || current.semantic.vector_dimensions != next.semantic.vector_dimensions;
-
-        if current.semantic.vector_dimensions != next.semantic.vector_dimensions {
-            let previous_vector_store = self.vector_store.read().await.clone();
-            *self.vector_store.write().await = None;
-
-            let recreate_result = match self.storage_kind {
-                RuntimeStorageKind::Memory => Ok(()),
-                RuntimeStorageKind::Sqlite => {
-                    let pool = self
-                        .sqlite_pool
-                        .as_ref()
-                        .context("sqlite pool unavailable during vector table recreate")?;
-                    db::recreate_vec0_table(pool, next.semantic.vector_dimensions).await
-                }
-                RuntimeStorageKind::Postgres => {
-                    let pool = self
-                        .postgres_pool
-                        .as_ref()
-                        .context("postgres pool unavailable during vector table recreate")?;
-                    recreate_pg_vector_table(pool, next.semantic.vector_dimensions).await
-                }
-            };
-
-            if let Err(error) = recreate_result {
-                *self.vector_store.write().await = previous_vector_store;
-                return Err(error);
-            }
-        }
-
-        let next_vector_store: Option<Arc<dyn VectorStore>> = if semantic_needs_rebuild {
-            if next.semantic.enabled {
-                let embedding_route = next.semantic.embedding_route.trim();
-                if embedding_route.is_empty() {
-                    tracing::warn!(
-                        "semantic cache enabled but embedding_route is empty; semantic cache disabled"
-                    );
-                    next.semantic.enabled = false;
-                    None
-                } else {
-                    let route_valid = {
-                        let route_cache = self.route_cache.read().await;
-                        route_cache
-                            .match_route(embedding_route)
-                            .map(|route| route.is_embedding_route())
-                            .unwrap_or(false)
-                    };
-                    if !route_valid {
-                        tracing::warn!(
-                            "semantic cache embedding route '{}' not found or not type=embedding; semantic cache disabled",
-                            embedding_route
-                        );
-                        next.semantic.enabled = false;
-                        None
-                    } else {
-                        match self.storage_kind {
-                            RuntimeStorageKind::Memory => {
-                                Some(Arc::new(MemoryVectorStore::new(next.semantic.max_entries)))
-                            }
-                            RuntimeStorageKind::Sqlite => {
-                                if let Some(pool) = self.sqlite_pool.clone() {
-                                    Some(Arc::new(SqliteVecVectorStore::new(
-                                        pool,
-                                        next.semantic.max_entries,
-                                    )))
-                                } else {
-                                    tracing::warn!(
-                                        "semantic cache selected sqlite storage but sqlite pool is unavailable; semantic cache disabled"
-                                    );
-                                    next.semantic.enabled = false;
-                                    None
-                                }
-                            }
-                            RuntimeStorageKind::Postgres => {
-                                if let Some(pool) = self.postgres_pool.clone() {
-                                    Some(Arc::new(PgVectorStore::new(
-                                        pool,
-                                        next.semantic.max_entries,
-                                    )))
-                                } else {
-                                    tracing::warn!(
-                                        "semantic cache selected postgres storage but postgres pool is unavailable; semantic cache disabled"
-                                    );
-                                    next.semantic.enabled = false;
-                                    None
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            self.vector_store.read().await.clone()
-        };
-
-        *self.cache_backend.write().await = next_cache_backend;
-        *self.vector_store.write().await = next_vector_store;
-        *self.runtime_cache_config.write().await = next;
-        Ok(())
     }
 
     pub async fn start_proxy(&self) -> anyhow::Result<()> {
@@ -402,9 +237,10 @@ impl Gateway {
 
         let cache_key = format!("{proxy_url}|{force_http1}");
         if let Some(cached) = self.proxy_client_cache.read().await.clone()
-            && cached.cache_key == cache_key {
-                return Ok(cached.client);
-            }
+            && cached.cache_key == cache_key
+        {
+            return Ok(cached.client);
+        }
 
         let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300));
         if force_http1 {

@@ -138,8 +138,15 @@ pub struct RuntimeBinding {
     pub extra_headers: HashMap<String, String>,
     pub model_aliases: HashMap<String, String>,
     pub models_source_override: Option<String>,
-    pub capabilities_source_override: Option<String>,
     pub disable_default_auth: bool,
+    /// When `Some`, the admin model-discovery paths return this exact
+    /// list and skip every URL/HTTP fallback. OAuth drivers (Claude
+    /// Code, future Codex tiers) use this to ship a curated allow-list
+    /// since their upstream `/v1/models` either does not accept the
+    /// minted Bearer or returns models the OAuth subscription cannot
+    /// actually run.
+    #[serde(default)]
+    pub static_models_override: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -296,7 +303,10 @@ pub trait AuthDriver: Send + Sync {
         _input: AuthExchangeInput,
         _ctx: ExchangeAuthContext,
     ) -> anyhow::Result<CredentialBundle> {
-        bail!("{} exchange flow is not implemented yet", self.metadata().key)
+        bail!(
+            "{} exchange flow is not implemented yet",
+            self.metadata().key
+        )
     }
 
     async fn refresh(
@@ -304,7 +314,10 @@ pub trait AuthDriver: Send + Sync {
         _credential: &StoredCredential,
         _ctx: RefreshAuthContext,
     ) -> anyhow::Result<CredentialBundle> {
-        bail!("{} refresh flow is not implemented yet", self.metadata().key)
+        bail!(
+            "{} refresh flow is not implemented yet",
+            self.metadata().key
+        )
     }
 
     fn bind_runtime(

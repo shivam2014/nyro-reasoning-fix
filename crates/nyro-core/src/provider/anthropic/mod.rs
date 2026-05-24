@@ -8,46 +8,90 @@ use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
-use crate::protocol::types::{InternalRequest, InternalResponse};
-use crate::provider::adapter::{ProviderAdapter, ProviderCtx};
-use crate::provider::common::openai::{
-    openai_compat_build_request, openai_compat_parse_response, openai_compat_stream_parser,
-};
+use crate::protocol::ir::{AiRequest, AiResponse};
+use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
-use crate::provider::metadata::{AuthMode, ChannelDef, Label, ProtocolBaseUrl, VendorMetadata};
+use crate::provider::metadata::{
+    AuthMode, CapabilitiesSource, ChannelDef, Label, OAuthConfig, ProtocolBaseUrl, VendorMetadata,
+};
 use crate::provider::outbound::OutboundRequest;
-use crate::protocol::ids::ProtocolFamily;
-use crate::provider::registry::{ProviderAdapterRegistration, VendorRegistration, VendorScope};
-use crate::provider::stream::ProviderStreamParser;
+use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
+use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "anthropic",
-    label: Label { zh: "Anthropic", en: "Anthropic" },
+    label: Label {
+        zh: "Anthropic",
+        en: "Anthropic",
+    },
     icon: "anthropic",
-    default_protocol: "anthropic",
-    channels: &[ChannelDef {
-        id: "default",
-        label: Label { zh: "默认", en: "Default" },
-        base_urls: &[ProtocolBaseUrl {
-            protocol: "anthropic",
-            base_url: "https://api.anthropic.com",
-        }],
-        api_key: None,
-        models_source: Some("https://api.anthropic.com/v1/models"),
-        capabilities_source: Some("ai://models.dev/anthropic"),
-        static_models: &[],
-        auth_mode: AuthMode::ApiKey,
-        oauth: None,
-        runtime: None,
-    }],
+    default_protocol: "anthropic-messages",
+    channels: &[
+        ChannelDef {
+            id: "default",
+            label: Label {
+                zh: "默认",
+                en: "Default",
+            },
+            base_urls: &[ProtocolBaseUrl {
+                protocol: "anthropic-messages",
+                base_url: "https://api.anthropic.com",
+            }],
+            api_key: None,
+            models_source: Some("https://api.anthropic.com/v1/models"),
+            capabilities_source: CapabilitiesSource::ModelsDev("anthropic"),
+            static_models: &[],
+            auth_mode: AuthMode::ApiKey,
+            oauth: None,
+            runtime: None,
+        },
+        ChannelDef {
+            id: "claude-code",
+            label: Label {
+                zh: "Claude Code",
+                en: "Claude Code",
+            },
+            base_urls: &[ProtocolBaseUrl {
+                protocol: "anthropic-messages",
+                base_url: "https://api.anthropic.com",
+            }],
+            api_key: None,
+            models_source: Some("ai://models.dev/anthropic"),
+            capabilities_source: CapabilitiesSource::ModelsDev("anthropic"),
+            static_models: &[
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+                "claude-opus-4-5-20251101",
+                "claude-sonnet-4-5-20250929",
+                "claude-sonnet-4-20250514",
+                "claude-opus-4-1-20250805",
+                "claude-opus-4-20250514",
+                "claude-haiku-4-5-20251001",
+                "claude-3-5-haiku-20241022",
+            ],
+            auth_mode: AuthMode::OAuth,
+            oauth: Some(OAuthConfig {
+                auth_base_url: "https://claude.ai",
+                authorize_url: "https://claude.ai/oauth/authorize",
+                token_url: "https://console.anthropic.com/v1/oauth/token",
+                client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                redirect_uri: "https://platform.claude.com/oauth/code/callback",
+                scope: "user:inference user:profile",
+            }),
+            runtime: None,
+        },
+    ],
 };
 
 pub struct AnthropicVendor;
 
-impl VendorExtension for AnthropicVendor {
+#[async_trait]
+impl Vendor for AnthropicVendor {
     fn scope(&self) -> VendorScope {
-        VendorScope::Vendor { vendor_id: "anthropic" }
+        VendorScope::Vendor {
+            vendor_id: "anthropic",
+        }
     }
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
@@ -60,10 +104,6 @@ impl VendorExtension for AnthropicVendor {
         h.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         h
     }
-}
-
-#[async_trait]
-impl ProviderAdapter for AnthropicVendor {
     fn vendor_id(&self) -> &'static str {
         "anthropic"
     }
@@ -71,22 +111,25 @@ impl ProviderAdapter for AnthropicVendor {
         use crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
         &[ANTHROPIC_MESSAGES_2023_06_01]
     }
+    fn declared_request_mutations(&self) -> bool {
+        false
+    }
+    fn declared_response_mutations(&self) -> bool {
+        false
+    }
     async fn build_request(
         &self,
-        req: &mut InternalRequest,
+        req: &mut AiRequest,
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
-        openai_compat_build_request(self, req, ctx).await
+        pipeline::build_request(self, req, ctx).await
     }
     async fn parse_response(
         &self,
         resp: InboundResponse,
         ctx: &ProviderCtx<'_>,
-    ) -> Result<InternalResponse, GatewayError> {
-        openai_compat_parse_response(self, resp, ctx).await
-    }
-    fn stream_parser(&self, ctx: &ProviderCtx<'_>) -> Box<dyn ProviderStreamParser + Send> {
-        openai_compat_stream_parser(ctx)
+    ) -> Result<AiResponse, GatewayError> {
+        pipeline::parse_response(self, resp, ctx).await
     }
     fn map_error(&self, status: u16, body: Value) -> GatewayError {
         let msg = body
@@ -99,20 +142,16 @@ impl ProviderAdapter for AnthropicVendor {
     }
 }
 
-inventory::submit! {
-    VendorRegistration { make: || Box::new(AnthropicVendor) }
-}
-
-inventory::submit! {
-    ProviderAdapterRegistration { make: || Box::new(AnthropicVendor) }
-}
+inventory::submit! { VendorRegistration { make: || Box::new(AnthropicVendor) } }
 
 /// Family-level fallback for providers with blank/unknown vendor on Anthropic-family protocols.
 pub struct AnthropicFamilyExt;
 
 impl VendorExtension for AnthropicFamilyExt {
     fn scope(&self) -> VendorScope {
-        VendorScope::Family(ProtocolFamily::Anthropic)
+        VendorScope::Vendor {
+            vendor_id: "anthropic",
+        }
     }
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         None
@@ -127,6 +166,4 @@ impl VendorExtension for AnthropicFamilyExt {
     }
 }
 
-inventory::submit! {
-    VendorRegistration { make: || Box::new(AnthropicFamilyExt) }
-}
+inventory::submit! { ExtensionRegistration { make: || Box::new(AnthropicFamilyExt) } }

@@ -1,31 +1,14 @@
 pub mod models;
 
 use std::path::Path;
-use std::sync::Once;
 
-use sqlite_vec::sqlite3_vec_init;
 use sqlx::Row;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::protocol::registry::ProtocolRegistry;
 
-static SQLITE_VEC_INIT: Once = Once::new();
-const VECTOR_DIMENSIONS_SETTING_KEY: &str = "vector_embedding_dimensions";
-
 pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
-    SQLITE_VEC_INIT.call_once(|| unsafe {
-        // Register sqlite-vec once per process. All later SQLite connections can use vec0 tables.
-        libsqlite3_sys::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut libsqlite3_sys::sqlite3,
-                *mut *mut i8,
-                *const libsqlite3_sys::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
-    });
-
     std::fs::create_dir_all(data_dir)?;
     let db_path = data_dir.join("gateway.db");
 
@@ -43,27 +26,21 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-pub async fn migrate(pool: &SqlitePool, vector_dimensions: usize) -> anyhow::Result<()> {
+pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::raw_sql(INIT_SQL).execute(pool).await?;
     ensure_provider_column(pool, "vendor", "TEXT").await?;
     ensure_provider_column(pool, "preset_key", "TEXT").await?;
     ensure_provider_column(pool, "channel", "TEXT").await?;
     ensure_provider_column(pool, "models_source", "TEXT").await?;
-    ensure_provider_column(pool, "capabilities_source", "TEXT").await?;
+    drop_provider_column_if_exists(pool, "capabilities_source").await?;
     ensure_provider_column(pool, "static_models", "TEXT").await?;
     ensure_provider_column(pool, "last_test_success", "INTEGER").await?;
     ensure_provider_column(pool, "last_test_at", "TEXT").await?;
     ensure_provider_column(pool, "use_proxy", "INTEGER DEFAULT 0").await?;
-    ensure_provider_column(pool, "default_protocol", "TEXT NOT NULL DEFAULT ''").await?;
-    ensure_provider_column(pool, "protocol_endpoints", "TEXT NOT NULL DEFAULT '{}'").await?;
-    backfill_provider_protocol_endpoints(pool).await?;
+    migrate_collapse_provider_protocol_columns(pool).await?;
     ensure_route_column(pool, "virtual_model", "TEXT").await?;
     ensure_route_column(pool, "strategy", "TEXT DEFAULT 'weighted'").await?;
     ensure_route_column(pool, "access_control", "INTEGER DEFAULT 0").await?;
-    ensure_route_column(pool, "route_type", "TEXT DEFAULT 'chat'").await?;
-    ensure_route_column(pool, "cache_exact_ttl", "INTEGER").await?;
-    ensure_route_column(pool, "cache_semantic_ttl", "INTEGER").await?;
-    ensure_route_column(pool, "cache_semantic_threshold", "REAL").await?;
     ensure_request_log_column(pool, "api_key_id", "TEXT").await?;
     ensure_request_log_column(pool, "method", "TEXT").await?;
     ensure_request_log_column(pool, "path", "TEXT").await?;
@@ -95,7 +72,6 @@ pub async fn migrate(pool: &SqlitePool, vector_dimensions: usize) -> anyhow::Res
     ensure_api_key_column(pool, "is_enabled", "INTEGER DEFAULT 1").await?;
     migrate_api_key_status_to_is_enabled(pool).await?;
     ensure_route_targets_table(pool).await?;
-    ensure_cache_entries_table(pool).await?;
     ensure_provider_column(pool, "auth_mode", "TEXT NOT NULL DEFAULT 'apikey'").await?;
     sqlx::query("UPDATE providers SET auth_mode = 'apikey' WHERE auth_mode = 'api_key'")
         .execute(pool)
@@ -105,67 +81,69 @@ pub async fn migrate(pool: &SqlitePool, vector_dimensions: usize) -> anyhow::Res
     ensure_provider_column(pool, "expires_at", "TEXT").await?;
     ensure_oauth_credentials_table(pool).await?;
     migrate_oauth_credentials_from_providers(pool).await?;
-    ensure_semantic_cache_vectors_table(pool, vector_dimensions).await?;
     backfill_provider_vendor(pool).await?;
     migrate_vendor_renames(pool).await?;
     normalize_provider_protocols(pool).await?;
     backfill_route_fields(pool).await?;
     backfill_route_targets(pool).await?;
+    migrate_logs_v2_spec_aligned(pool).await?;
+    ensure_request_log_column(pool, "is_stream", "INTEGER DEFAULT 0").await?;
+    ensure_request_log_column(pool, "api_key_name", "TEXT").await?;
+    ensure_request_log_column(pool, "provider_name", "TEXT").await?;
+    ensure_request_log_column(pool, "route_id", "TEXT").await?;
+    ensure_request_log_column(pool, "route_name", "TEXT").await?;
+    ensure_request_log_column(pool, "cache_read_tokens", "INTEGER DEFAULT 0").await?;
     Ok(())
 }
 
-/// Rewrites legacy / alias protocol identifiers in `providers` rows into
-/// canonical [`ProtocolId`](crate::protocol::ids::ProtocolId) strings.
-///
-/// Two columns are touched:
-///
-/// - `providers.default_protocol` — single value, e.g. `"openai"` →
-///   `"openai/chat/v1"`.
-/// - `providers.protocol_endpoints` — JSON object, e.g.
-///   `{ "openai": {...}, "openai_responses": {...} }` →
-///   `{ "openai/chat/v1": {...}, "openai/responses/v1": {...} }`.
-///
-/// Idempotent: re-running on already-normalized rows is a no-op (the
-/// row signature is unchanged so no UPDATE is issued). Unknown keys are
-/// preserved verbatim with a `tracing::warn` so a foreign yaml import
-/// can still be inspected manually.
+/// Rewrites legacy / alias protocol identifiers in `providers.protocol` into
+/// canonical protocol-suite strings (for example, `openai` -> `openai-compatible`).
 async fn normalize_provider_protocols(pool: &SqlitePool) -> anyhow::Result<()> {
     let reg = ProtocolRegistry::global();
-    let rows = sqlx::query("SELECT id, default_protocol, protocol_endpoints FROM providers")
+    let rows = sqlx::query("SELECT id, protocol FROM providers")
         .fetch_all(pool)
         .await?;
 
     for row in rows {
         let id: String = row.try_get("id")?;
-        let raw_default: String = row.try_get("default_protocol").unwrap_or_default();
-        let raw_endpoints: String = row.try_get("protocol_endpoints").unwrap_or_default();
+        let raw_protocol: String = row.try_get("protocol").unwrap_or_default();
+        let new_protocol = normalize_provider_protocol_value(reg, &raw_protocol);
 
-        let new_default = reg.normalize_string(&raw_default);
-        let new_endpoints = reg.normalize_endpoints_json(&raw_endpoints);
-
-        let default_changed = new_default != raw_default;
-        let endpoints_changed = new_endpoints != raw_endpoints;
-        if !default_changed && !endpoints_changed {
+        if new_protocol == raw_protocol {
             continue;
         }
 
         tracing::info!(
             provider_id = %id,
-            default_changed,
-            endpoints_changed,
-            "normalizing provider protocol identifiers to canonical ProtocolId form"
+            old_protocol = %raw_protocol,
+            new_protocol = %new_protocol,
+            "normalizing provider protocol identifier"
         );
 
-        sqlx::query(
-            "UPDATE providers SET default_protocol = ?1, protocol_endpoints = ?2 WHERE id = ?3",
-        )
-        .bind(&new_default)
-        .bind(&new_endpoints)
-        .bind(&id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE providers SET protocol = ?1 WHERE id = ?2")
+            .bind(&new_protocol)
+            .bind(&id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
+}
+
+fn normalize_provider_protocol_value(reg: &ProtocolRegistry, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match reg.parse_protocol(trimmed) {
+        Some(protocol) => protocol.as_str().to_string(),
+        None => {
+            tracing::warn!(
+                value = trimmed,
+                "leaving unrecognized provider protocol identifier unchanged"
+            );
+            trimmed.to_string()
+        }
+    }
 }
 
 async fn backfill_provider_vendor(pool: &SqlitePool) -> anyhow::Result<()> {
@@ -199,55 +177,111 @@ async fn migrate_vendor_renames(pool: &SqlitePool) -> anyhow::Result<()> {
 
     if column_exists(pool, "providers", "vendor").await? {
         for (from, to) in RENAMES {
-            sqlx::query(
-                "UPDATE providers SET vendor = ?1 WHERE lower(trim(vendor)) = ?2",
-            )
-            .bind(to)
-            .bind(from)
-            .execute(pool)
-            .await?;
+            sqlx::query("UPDATE providers SET vendor = ?1 WHERE lower(trim(vendor)) = ?2")
+                .bind(to)
+                .bind(from)
+                .execute(pool)
+                .await?;
         }
     }
 
     if column_exists(pool, "providers", "preset_key").await? {
         for (from, to) in RENAMES {
-            sqlx::query(
-                "UPDATE providers SET preset_key = ?1 WHERE lower(trim(preset_key)) = ?2",
-            )
-            .bind(to)
-            .bind(from)
-            .execute(pool)
-            .await?;
+            sqlx::query("UPDATE providers SET preset_key = ?1 WHERE lower(trim(preset_key)) = ?2")
+                .bind(to)
+                .bind(from)
+                .execute(pool)
+                .await?;
         }
     }
     Ok(())
 }
 
-async fn backfill_provider_protocol_endpoints(pool: &SqlitePool) -> anyhow::Result<()> {
-    if column_exists(pool, "providers", "default_protocol").await?
-        && column_exists(pool, "providers", "protocol_endpoints").await?
-        && column_exists(pool, "providers", "protocol").await?
-    {
-        sqlx::query(
-            "UPDATE providers \
-             SET default_protocol = protocol \
-             WHERE (default_protocol IS NULL OR trim(default_protocol) = '') \
-               AND protocol IS NOT NULL AND trim(protocol) != ''",
-        )
-        .execute(pool)
-        .await?;
+async fn migrate_collapse_provider_protocol_columns(pool: &SqlitePool) -> anyhow::Result<()> {
+    let has_default_protocol = column_exists(pool, "providers", "default_protocol").await?;
+    let has_protocol_endpoints = column_exists(pool, "providers", "protocol_endpoints").await?;
+    if !has_default_protocol && !has_protocol_endpoints {
+        return Ok(());
+    }
 
+    if has_default_protocol {
         sqlx::query(
             "UPDATE providers \
-             SET protocol_endpoints = json_object(trim(protocol), json_object('base_url', trim(base_url))) \
-             WHERE (protocol_endpoints IS NULL OR trim(protocol_endpoints) = '' OR trim(protocol_endpoints) = '{}') \
-               AND protocol IS NOT NULL AND trim(protocol) != '' \
-               AND base_url IS NOT NULL AND trim(base_url) != ''",
+             SET protocol = trim(default_protocol) \
+             WHERE default_protocol IS NOT NULL AND trim(default_protocol) != ''",
         )
         .execute(pool)
         .await?;
     }
+
+    if has_protocol_endpoints {
+        let rows = sqlx::query("SELECT id, protocol, base_url, protocol_endpoints FROM providers")
+            .fetch_all(pool)
+            .await?;
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let protocol: String = row.try_get("protocol").unwrap_or_default();
+            let base_url: String = row.try_get("base_url").unwrap_or_default();
+            if !base_url.trim().is_empty() {
+                continue;
+            }
+            let raw_endpoints: String = row.try_get("protocol_endpoints").unwrap_or_default();
+            if let Some(next_base_url) = base_url_from_protocol_endpoints(&raw_endpoints, &protocol)
+            {
+                sqlx::query("UPDATE providers SET base_url = ?1 WHERE id = ?2")
+                    .bind(next_base_url)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
+
+    if has_protocol_endpoints {
+        drop_provider_column_if_exists(pool, "protocol_endpoints").await?;
+    }
+    if has_default_protocol {
+        drop_provider_column_if_exists(pool, "default_protocol").await?;
+    }
+
     Ok(())
+}
+
+fn base_url_from_protocol_endpoints(raw: &str, protocol: &str) -> Option<String> {
+    let reg = ProtocolRegistry::global();
+    let target = reg.parse_protocol(protocol)?;
+    let value = serde_json::from_str::<serde_json::Value>(raw.trim()).ok()?;
+    let obj = value.as_object()?;
+    let mut skipped = 0usize;
+    let mut matched = None;
+    for (key, entry) in obj {
+        let Some(entry_protocol) = reg.parse_protocol(key) else {
+            skipped += 1;
+            continue;
+        };
+        if entry_protocol == target {
+            matched = entry
+                .as_object()
+                .and_then(|object| object.get("base_url"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            if matched.is_some() {
+                break;
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            protocol = protocol,
+            skipped_entries = skipped,
+            "dropping non-selected protocol_endpoints entries during provider protocol collapse"
+        );
+    }
+    matched
 }
 
 async fn ensure_provider_column(
@@ -263,6 +297,26 @@ async fn ensure_provider_column(
     Ok(())
 }
 
+/// Drop a providers column that is no longer part of the schema (SQLite 3.35+).
+async fn drop_provider_column_if_exists(
+    pool: &SqlitePool,
+    column_name: &str,
+) -> anyhow::Result<()> {
+    if column_exists(pool, "providers", column_name).await? {
+        let sql = format!("ALTER TABLE providers DROP COLUMN {column_name}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn drop_route_column_if_exists(pool: &SqlitePool, column_name: &str) -> anyhow::Result<()> {
+    if column_exists(pool, "routes", column_name).await? {
+        let sql = format!("ALTER TABLE routes DROP COLUMN {column_name}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    Ok(())
+}
+
 async fn ensure_route_column(
     pool: &SqlitePool,
     column_name: &str,
@@ -272,6 +326,124 @@ async fn ensure_route_column(
         let sql = format!("ALTER TABLE routes ADD COLUMN {column_name} {definition}");
         sqlx::query(&sql).execute(pool).await?;
     }
+
+    Ok(())
+}
+
+/// Idempotent migration: upgrade request_logs from the legacy 21-column schema
+/// to the spec-aligned 26-column schema.
+///
+/// Operations (all idempotent via column existence checks):
+///   1. RENAME COLUMN (11 renames) — old → new names per spec.
+///   2. ADD COLUMN (9 new columns).
+///   3. Migrate created_at: TEXT datetime → INTEGER Unix ms.
+///   4. Rebuild indexes with new names.
+async fn migrate_logs_v2_spec_aligned(pool: &SqlitePool) -> anyhow::Result<()> {
+    // Helper: rename a column in request_logs if the old name still exists.
+    async fn rename_col(pool: &SqlitePool, old: &str, new: &str) -> anyhow::Result<()> {
+        if column_exists(pool, "request_logs", old).await?
+            && !column_exists(pool, "request_logs", new).await?
+        {
+            sqlx::query(&format!(
+                "ALTER TABLE request_logs RENAME COLUMN {old} TO {new}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    // ── Step 1: RENAME COLUMNS ─────────────────────────────────────────────
+    // Handle intermediate state: an earlier version of this migration renamed
+    // `created_at → timestamp`.  Roll it back to the canonical `created_at`.
+    rename_col(pool, "timestamp", "created_at").await?;
+    rename_col(pool, "ingress_protocol", "client_protocol").await?;
+    rename_col(pool, "egress_protocol", "upstream_protocol").await?;
+    rename_col(pool, "provider_name", "provider_id").await?;
+    rename_col(pool, "request_model", "client_model").await?;
+    rename_col(pool, "actual_model", "upstream_model").await?;
+    rename_col(pool, "status_code", "client_status_code").await?;
+    rename_col(pool, "duration_ms", "latency_total_ms").await?;
+    rename_col(pool, "request_headers", "client_request_headers").await?;
+    rename_col(pool, "request_body", "client_request_body").await?;
+    rename_col(pool, "response_headers", "upstream_response_headers").await?;
+    rename_col(pool, "response_body", "client_response_body").await?;
+
+    // ── Step 2: Migrate created_at values ─────────────────────────────────
+    if column_exists(pool, "request_logs", "created_at").await? {
+        // 2a. NULL → 0 (rows inserted by older code paths that omitted created_at).
+        sqlx::query("UPDATE request_logs SET created_at = 0 WHERE created_at IS NULL")
+            .execute(pool)
+            .await?;
+
+        // 2b. ISO8601 TEXT (e.g. "2024-01-15 10:00:00") → INTEGER Unix milliseconds.
+        //     Detect by checking whether any row holds a text value that starts with
+        //     a 4-digit year (LIKE '____-%'), which unambiguously identifies ISO8601.
+        let has_iso_ts: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM request_logs \
+             WHERE typeof(created_at) = 'text' AND created_at LIKE '____-%' LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false);
+
+        if has_iso_ts {
+            sqlx::query(
+                "UPDATE request_logs \
+                 SET created_at = CAST(strftime('%s', created_at) AS INTEGER) * 1000 \
+                 WHERE typeof(created_at) = 'text' AND created_at LIKE '____-%'",
+            )
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    // ── Step 3: ADD new columns ────────────────────────────────────────────
+    ensure_request_log_column(pool, "upstream_url", "TEXT").await?;
+    ensure_request_log_column(pool, "client_response_headers", "TEXT").await?;
+    ensure_request_log_column(pool, "upstream_request_headers", "TEXT").await?;
+    ensure_request_log_column(pool, "upstream_request_body", "TEXT").await?;
+    ensure_request_log_column(pool, "upstream_response_body", "TEXT").await?;
+    ensure_request_log_column(pool, "upstream_status_code", "INTEGER").await?;
+    ensure_request_log_column(pool, "latency_upstream_ms", "INTEGER").await?;
+    ensure_request_log_column(pool, "stream_chunks_count", "INTEGER DEFAULT 0").await?;
+    ensure_request_log_column(pool, "stream_first_chunk_ms", "INTEGER").await?;
+
+    // ── Step 4: Rebuild indexes ────────────────────────────────────────────
+    // Drop stale index left by the intermediate `timestamp`-column migration.
+    sqlx::query("DROP INDEX IF EXISTS idx_logs_timestamp")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_created_at ON request_logs(created_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_provider_id ON request_logs(provider_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_client_status ON request_logs(client_status_code)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_upstream_model ON request_logs(upstream_model)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_client_protocol ON request_logs(client_protocol)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_upstream_protocol ON request_logs(upstream_protocol)",
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -365,81 +537,6 @@ async fn ensure_route_targets_table(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ensure_cache_entries_table(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS cache_entries (
-            key         TEXT PRIMARY KEY,
-            data        BLOB NOT NULL,
-            expires_at  TEXT NOT NULL,
-            created_at  TEXT DEFAULT (datetime('now'))
-        )"#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_cache_entries_expires_at ON cache_entries(expires_at)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn recreate_vec0_table(pool: &SqlitePool, vector_dimensions: usize) -> anyhow::Result<()> {
-    let dimensions = vector_dimensions.max(1);
-    sqlx::query("DROP TABLE IF EXISTS semantic_cache_vectors")
-        .execute(pool)
-        .await?;
-
-    let ddl = format!(
-        r#"CREATE VIRTUAL TABLE semantic_cache_vectors USING vec0(
-            partition TEXT partition key,
-            cache_key TEXT,
-            dimensions INTEGER,
-            embedding float[{dimensions}] distance_metric=cosine,
-            +data BLOB,
-            created_at INTEGER
-        )"#
-    );
-    sqlx::query(&ddl).execute(pool).await?;
-    sqlx::query(
-        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    )
-    .bind(VECTOR_DIMENSIONS_SETTING_KEY)
-    .bind(dimensions.to_string())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn ensure_semantic_cache_vectors_table(
-    pool: &SqlitePool,
-    vector_dimensions: usize,
-) -> anyhow::Result<()> {
-    let dimensions = vector_dimensions.max(1);
-    let stored_dimension = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
-        .bind(VECTOR_DIMENSIONS_SETTING_KEY)
-        .fetch_optional(pool)
-        .await?
-        .and_then(|raw| raw.trim().parse::<usize>().ok());
-    let table_exists = semantic_cache_vectors_table_exists(pool).await?;
-    if !table_exists || stored_dimension != Some(dimensions) {
-        recreate_vec0_table(pool, dimensions).await?;
-    }
-    Ok(())
-}
-
-async fn semantic_cache_vectors_table_exists(pool: &SqlitePool) -> anyhow::Result<bool> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'semantic_cache_vectors'",
-    )
-    .fetch_one(pool)
-    .await?;
-    Ok(count > 0)
-}
-
 async fn migrate_provider_is_active_to_is_enabled(pool: &SqlitePool) -> anyhow::Result<()> {
     if column_exists(pool, "providers", "is_active").await? {
         sqlx::query("UPDATE providers SET is_enabled = is_active WHERE is_enabled IS NULL OR is_enabled != is_active AND is_active IS NOT NULL")
@@ -478,30 +575,7 @@ async fn backfill_route_fields(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
     }
-    if column_exists(pool, "routes", "route_type").await? {
-        sqlx::query(
-            "UPDATE routes SET route_type = 'chat' WHERE route_type IS NULL OR trim(route_type) = ''",
-        )
-        .execute(pool)
-        .await?;
-    }
-    if column_exists(pool, "routes", "cache_ttl").await? {
-        sqlx::query(
-            "UPDATE routes SET cache_exact_ttl = cache_ttl WHERE cache_exact_ttl IS NULL AND cache_ttl IS NOT NULL",
-        )
-        .execute(pool)
-        .await?;
-    }
-    if column_exists(pool, "routes", "cache_enabled").await? {
-        sqlx::query(
-            "UPDATE routes SET cache_exact_ttl = 3600 WHERE cache_enabled = 1 AND cache_exact_ttl IS NULL",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query("UPDATE routes SET cache_exact_ttl = NULL WHERE cache_enabled = 0")
-            .execute(pool)
-            .await?;
-    }
+    drop_route_column_if_exists(pool, "route_type").await?;
 
     Ok(())
 }
@@ -599,7 +673,6 @@ CREATE TABLE IF NOT EXISTS providers (
     preset_key  TEXT,
     channel     TEXT,
     models_source TEXT,
-    capabilities_source TEXT,
     static_models TEXT,
     api_key     TEXT NOT NULL,
     auth_mode   TEXT NOT NULL DEFAULT 'apikey' CHECK (auth_mode IN ('apikey', 'oauth')),
@@ -620,12 +693,8 @@ CREATE TABLE IF NOT EXISTS routes (
     name              TEXT NOT NULL,
     virtual_model     TEXT,
     strategy          TEXT DEFAULT 'weighted',
-    route_type        TEXT DEFAULT 'chat',
     target_provider   TEXT NOT NULL REFERENCES providers(id),
     target_model      TEXT NOT NULL,
-    cache_exact_ttl   INTEGER,
-    cache_semantic_ttl INTEGER,
-    cache_semantic_threshold REAL,
     access_control    INTEGER DEFAULT 0,
     is_enabled        INTEGER DEFAULT 1,
     priority          INTEGER DEFAULT 0,
@@ -645,47 +714,44 @@ CREATE TABLE IF NOT EXISTS route_targets (
 CREATE INDEX IF NOT EXISTS idx_route_targets_route_id ON route_targets(route_id);
 
 CREATE TABLE IF NOT EXISTS request_logs (
-    id                TEXT PRIMARY KEY,
-    created_at        TEXT DEFAULT (datetime('now')),
-    api_key_id        TEXT,
-    ingress_protocol  TEXT,
-    egress_protocol   TEXT,
-    request_model     TEXT,
-    actual_model      TEXT,
-    provider_name     TEXT,
-    status_code       INTEGER,
-    duration_ms       REAL,
-    input_tokens      INTEGER DEFAULT 0,
-    output_tokens     INTEGER DEFAULT 0,
-    is_stream         INTEGER DEFAULT 0,
-    is_tool_call      INTEGER DEFAULT 0,
-    error_message     TEXT,
-    response_preview  TEXT,
-    method            TEXT,
-    path              TEXT,
-    request_headers   TEXT,
-    request_body      TEXT,
-    response_headers  TEXT,
-    response_body     TEXT
+    id                        TEXT PRIMARY KEY,
+    created_at                INTEGER NOT NULL DEFAULT 0,
+    api_key_id                TEXT,
+    api_key_name              TEXT,
+    client_protocol           TEXT,
+    upstream_protocol         TEXT,
+    provider_id               TEXT,
+    provider_name             TEXT,
+    route_id                  TEXT,
+    route_name                TEXT,
+    upstream_url              TEXT,
+    client_model              TEXT,
+    upstream_model            TEXT,
+    method                    TEXT,
+    path                      TEXT,
+    client_request_headers    TEXT,
+    client_request_body       TEXT,
+    client_response_headers   TEXT,
+    client_response_body      TEXT,
+    upstream_request_headers  TEXT,
+    upstream_request_body     TEXT,
+    upstream_response_headers TEXT,
+    upstream_response_body    TEXT,
+    upstream_status_code      INTEGER,
+    client_status_code        INTEGER,
+    latency_total_ms          INTEGER,
+    latency_upstream_ms       INTEGER,
+    input_tokens              INTEGER DEFAULT 0,
+    output_tokens             INTEGER DEFAULT 0,
+    cache_read_tokens         INTEGER DEFAULT 0,
+    is_stream                 INTEGER DEFAULT 0,
+    stream_chunks_count       INTEGER DEFAULT 0,
+    stream_first_chunk_ms     INTEGER
 );
-
-CREATE INDEX IF NOT EXISTS idx_logs_created_at ON request_logs(created_at);
-CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider_name);
-CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status_code);
-CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(actual_model);
 
 CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
-
-CREATE TABLE IF NOT EXISTS cache_entries (
-    key         TEXT PRIMARY KEY,
-    data        BLOB NOT NULL,
-    expires_at  TEXT NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_cache_entries_expires_at ON cache_entries(expires_at);
 "#;

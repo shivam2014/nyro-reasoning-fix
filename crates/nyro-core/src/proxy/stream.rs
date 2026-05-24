@@ -29,7 +29,7 @@
 //! bridge.finish();   // sets Completed; Drop handles the Failed case
 //! ```
 
-use crate::protocol::types::TokenUsage;
+use crate::protocol::ir::Usage;
 use crate::proxy::context::{CancellationToken, RequestContext, RequestOutcome};
 
 // ── Failure variants ──────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ impl StreamState {
 
 /// A callback that MUST run when the bridge is dropped.
 ///
-/// Used to release singleflight slots, cache reservations, etc.
+/// Used to release resource reservations, cleanup state, etc.
 pub type CleanupFn = Box<dyn FnOnce() + Send + 'static>;
 
 // ── StreamBridge ──────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ pub struct StreamBridge<'a> {
     ctx: &'a RequestContext,
     state: StreamState,
     chunks_sent: usize,
-    final_usage: Option<TokenUsage>,
+    final_usage: Option<Usage>,
     cancellation: CancellationToken,
     cleanups: Vec<CleanupFn>,
 }
@@ -193,18 +193,21 @@ impl<'a> StreamBridge<'a> {
     pub fn finish(&mut self) {
         if !self.state.is_terminal() {
             self.state = StreamState::Finishing;
-            self.ctx.trace("stream", format!("finishing; {} chunks sent", self.chunks_sent));
+            self.ctx.trace(
+                "stream",
+                format!("finishing; {} chunks sent", self.chunks_sent),
+            );
             self.complete();
         }
     }
 
     /// Record the final token usage (from the provider's `usage` event or
     /// the accumulator).
-    pub fn set_final_usage(&mut self, usage: TokenUsage) {
+    pub fn set_final_usage(&mut self, usage: Usage) {
         self.final_usage = Some(usage);
     }
 
-    pub fn final_usage(&self) -> Option<&TokenUsage> {
+    pub fn final_usage(&self) -> Option<&Usage> {
         self.final_usage.as_ref()
     }
 
@@ -224,17 +227,26 @@ impl<'a> StreamBridge<'a> {
         if self.state.is_terminal() {
             return;
         }
-        self.ctx.trace("stream", format!("failed: {:?}", failure.to_outcome_code()));
+        self.ctx
+            .trace("stream", format!("failed: {:?}", failure.to_outcome_code()));
         self.ctx.set_outcome(if self.chunks_sent > 0 {
-            RequestOutcome::PartialSuccess { chunks_sent: self.chunks_sent }
+            RequestOutcome::PartialSuccess {
+                chunks_sent: self.chunks_sent,
+            }
         } else {
-            RequestOutcome::Failed { stable_code: failure.to_outcome_code() }
+            RequestOutcome::Failed {
+                stable_code: failure.to_outcome_code(),
+            }
         });
         self.state = StreamState::Failed(failure);
     }
 
     fn failure(&self) -> Option<&StreamFailure> {
-        if let StreamState::Failed(f) = &self.state { Some(f) } else { None }
+        if let StreamState::Failed(f) = &self.state {
+            Some(f)
+        } else {
+            None
+        }
     }
 }
 
@@ -250,7 +262,9 @@ impl Drop for StreamBridge<'_> {
         // on an implicit success.
         if self.ctx.get_outcome().is_none() {
             self.ctx.set_outcome(if self.chunks_sent > 0 {
-                RequestOutcome::PartialSuccess { chunks_sent: self.chunks_sent }
+                RequestOutcome::PartialSuccess {
+                    chunks_sent: self.chunks_sent,
+                }
             } else {
                 RequestOutcome::ClientCancelled
             });
@@ -267,13 +281,16 @@ impl Drop for StreamBridge<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::OPENAI_CHAT_V1;
+    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     use crate::proxy::context::RequestContext;
     use std::sync::Arc;
     use std::time::Duration;
 
     fn ctx() -> RequestContext {
-        RequestContext::new(OPENAI_CHAT_V1, Duration::from_secs(30))
+        RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_secs(30),
+        )
     }
 
     // ── Fault 1: read interrupt ───────────────────────────────────────────────
@@ -286,9 +303,15 @@ mod tests {
         b.push_chunk(Ok(())).unwrap(); // first chunk OK
         b.push_chunk(Ok(())).unwrap();
         b.on_read_error("connection reset"); // simulated read break
-        assert!(matches!(b.state(), StreamState::Failed(StreamFailure::Upstream { .. })));
+        assert!(matches!(
+            b.state(),
+            StreamState::Failed(StreamFailure::Upstream { .. })
+        ));
         let outcome = c.get_outcome().unwrap().clone();
-        assert!(matches!(outcome, RequestOutcome::PartialSuccess { chunks_sent: 2 }));
+        assert!(matches!(
+            outcome,
+            RequestOutcome::PartialSuccess { chunks_sent: 2 }
+        ));
     }
 
     // ── Fault 2: parser error ─────────────────────────────────────────────────
@@ -300,7 +323,10 @@ mod tests {
         b.on_connected();
         let err = b.push_chunk(Err(StreamFailure::parse(Some("bad chunk".into()))));
         assert!(err.is_err());
-        assert!(matches!(b.state(), StreamState::Failed(StreamFailure::Parse { .. })));
+        assert!(matches!(
+            b.state(),
+            StreamState::Failed(StreamFailure::Parse { .. })
+        ));
         assert!(matches!(
             c.get_outcome().unwrap(),
             RequestOutcome::Failed { .. }
@@ -319,20 +345,29 @@ mod tests {
         b.cancellation.cancel();
         let result = b.push_chunk(Ok(()));
         assert!(result.is_err());
-        assert!(matches!(b.state(), StreamState::Failed(StreamFailure::ClientCancelled)));
+        assert!(matches!(
+            b.state(),
+            StreamState::Failed(StreamFailure::ClientCancelled)
+        ));
     }
 
     // ── Fault 4: timeout ──────────────────────────────────────────────────────
 
     #[test]
     fn fault_timeout_detected_in_push_chunk() {
-        let c = RequestContext::new(OPENAI_CHAT_V1, Duration::from_nanos(1));
+        let c = RequestContext::new(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Duration::from_nanos(1),
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
         let mut b = StreamBridge::new(&c);
         b.on_connected();
         let result = b.push_chunk(Ok(()));
         assert!(result.is_err());
-        assert!(matches!(b.state(), StreamState::Failed(StreamFailure::Timeout)));
+        assert!(matches!(
+            b.state(),
+            StreamState::Failed(StreamFailure::Timeout)
+        ));
     }
 
     // ── Fault 5: 5xx from upstream after SSE started ──────────────────────────
@@ -344,8 +379,14 @@ mod tests {
         b.on_connected();
         b.push_chunk(Ok(())).unwrap();
         b.on_read_error("upstream 503");
-        assert!(matches!(b.state(), StreamState::Failed(StreamFailure::Upstream { .. })));
-        assert!(matches!(c.get_outcome().unwrap(), RequestOutcome::PartialSuccess { .. }));
+        assert!(matches!(
+            b.state(),
+            StreamState::Failed(StreamFailure::Upstream { .. })
+        ));
+        assert!(matches!(
+            c.get_outcome().unwrap(),
+            RequestOutcome::PartialSuccess { .. }
+        ));
     }
 
     // ── Fault 6: stream ends without DONE event ───────────────────────────────
@@ -394,7 +435,9 @@ mod tests {
         let c = ctx();
         {
             let mut b = StreamBridge::new(&c);
-            b.add_cleanup(move || { ran_clone.store(true, Ordering::SeqCst); });
+            b.add_cleanup(move || {
+                ran_clone.store(true, Ordering::SeqCst);
+            });
         }
         assert!(ran.load(Ordering::SeqCst));
     }

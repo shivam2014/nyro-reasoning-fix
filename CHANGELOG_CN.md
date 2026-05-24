@@ -4,6 +4,159 @@ Nyro 的所有重要变更均记录在此文件中。
 
 ---
 
+## v1.7.6
+
+> 发布于 2026-05-22
+
+#### 新功能
+
+- **Vertex AI Provider 支持** (#172)：新增 Vertex AI 内置 Provider，修复 Gemini 入口认证处理
+- **Provider 复制工作流** (#173)：支持一键复制已有 Provider 配置
+- **Provider 复制时继承路由目标** (#178)：复制 Provider 时自动关联原 Provider 的路由目标
+- **客户端缓存提示透传** (#181)：将客户端请求中的 `anthropic-beta` 缓存控制提示转发至上游 Provider，同时不泄露客户端身份头
+- **上游错误信息保留** (#184)：代理转发失败时捕获并展示上游响应体和状态码，改善调试可见性
+- **Gemini 流式 JSON 处理** (#182)：处理 Gemini 流式端点返回的非流式 JSON 响应，将其解析到统一 IR 流式管线中
+
+#### 改进 / 重构
+
+- **Protocol 标识统一** (#174)：将不透明的短代码替换为描述性的规范 Protocol 标识符
+- **GoogleGenerativeAI → GoogleGemini 重命名** (#175)：重命名协议枚举变体并统一所有 Google/Gemini 端点常量
+- **Codec 目录重组** (#176)：将 Codec 模块按 `vendor/endpoint` 目录结构重组，与协议边界对齐
+- **Admin 模块化** (#180)：将单体 Admin Handler 拆分为专注的子模块，实现更清晰的职责分离
+
+#### 修复
+
+- **Storage E2E 模型同步** (#167)：对齐 Storage E2E 测试与当前模型定义
+- **Storage E2E 认证模式** (#168)：在 Storage E2E 测试中使用有效的 `apikey` 认证模式
+- **Storage E2E Token 检查** (#169)：移除 Storage E2E 测试中不可靠的 `total_output_tokens` 断言
+- **Postgres api_keys INSERT** (#170)：移除 api_keys INSERT 语句中过时的 `status` 列
+- **Postgres AVG() f64 兼容** (#171)：将 `AVG()` 结果转换为 `FLOAT8`，确保 Rust 中 f64 类型映射正确
+
+---
+
+## v1.7.5
+
+> 发布于 2026-05-19
+
+#### 修复
+
+- **Ingress decode 失败日志记录** (#164)：Anthropic Messages、OpenAI-compatible Chat Completions / Embeddings / Responses 与 Google Generate Content 入口在请求 decode 失败时，现在会在应用内日志模块记录请求元数据与 400 响应
+- **Anthropic context management beta 兼容** (#165)：兼容 Anthropic `context-management-2025-06-27` beta 发送的 `context_management` 请求形状，将其作为透传 JSON 保留，不再因缺少旧的外层 `type` 字段而返回 400
+
+---
+
+## v1.7.4
+
+> 发布于 2026-05-19
+
+#### 改进 / 重构
+
+- **Provider 配置简化** (#160)：将 Provider 存储与 WebUI 从多协议 endpoint 映射收敛为单一 `protocol` / `base_url` 配置，并保留旧数据迁移支持，同时同步 standalone 配置文档与测试
+
+#### 修复
+
+- **OpenAI-compatible 流式完成事件** (#162)：当同时收到 `finish_reason` 和 `[DONE]` 时去重终止 `Done` 事件，避免客户端收到重复的流式结束通知
+
+---
+
+## v1.7.3
+
+> 发布于 2026-05-18
+
+#### 功能
+
+- **IR 与协议 codec 流水线重构** (#145–#153)：围绕 `AiRequest`、`AiResponse`、`AiStreamDelta`、扩展后的 `ContentBlock`、`AiError`、`CacheControl` 和 `ProtocolExt` 重塑内部请求/响应表示；入口 decoder、出口 encoder、响应/流式 parser、dispatcher、provider adapter 与 cache 流程均改为直接消费新 IR；移除旧 `InternalRequest` / `InternalResponse` 路径，并将 codec trait 命名统一到 `Decoder` / `Encoder`
+- **请求日志元数据增强** (#154)：请求日志新增持久化 `provider_name`、`api_key_name`、`route_id`、`route_name`，并恢复 `is_stream` 记录，便于区分流式/非流式请求
+- **Prompt cache usage 统计** (#156)：补齐 Chat Completions prompt-cache 命中 token 采集，确保 cache-read usage 能进入下游统计
+
+#### 修复
+
+- **协议转换思考内容保留** (#157)：将 Anthropic thinking block 桥接到 OpenAI-compatible `reasoning_content`
+- **OpenAI Responses 流式 usage** (#140)：修复流式 usage delta 中 `input_tokens` 丢失的问题
+- **WebUI 日志详情加载** (#139)：将 `backend("get_log")` 正确映射到 `GET /api/v1/logs/:id`
+- **Provider 图标显示** (#133, #134)：修复新增/编辑 Provider 时图标为 `undefined`，以及自定义空图标显示异常的问题
+- **macOS 应用生命周期** (#132)：点击 Dock 图标时重新打开主窗口
+- **musl 构建告警** (#130)：消除 musl 构建下的 dead-code warning
+
+#### 重构 / 内部
+
+- 将 proxy ingress 代码按协议拆分到独立子目录 (#135)
+- 用类型化 `CapabilitiesSource` preset 替代 `capabilities_source` 字符串处理 (#136)
+- 移除 route 处理中的 `route_type` 字段和 endpoint subset filtering (#137)
+- 拆分 dispatcher 内部结构，引入 `CallCtx`、`CacheWriteCtx`、`RequestExtras`、`LogBuilder`、integrations hooks、routing strategies 与模块重命名 (#141–#143)
+- 新增 IR field-homing 设计骨架，并补充弃用告警、测试与文档清理 (#138, #144)
+
+---
+
+## v1.7.2
+
+> 发布于 2026-05-12
+
+#### 修复
+
+- **musl 静态构建：消除 OpenSSL 依赖** (#125)：为工作区 `reqwest` 依赖添加 `default-features = false` 并切换至 `rustls-tls-native-roots`；根本原因是 `default-tls`（reqwest 默认 feature）会静默引入 `native-tls` → `openssl-sys` 依赖链，导致 `*-unknown-linux-musl` CI 构建失败；同时显式保留 `http2`、`charset`、`macos-system-configuration` 避免功能回归；所有平台的 TLS 引擎均保持 `rustls`，非 musl 目标继续使用系统原生证书库（Windows 证书库 / macOS Keychain / Linux `/etc/ssl/certs`），musl 静态二进制自动回退至打包的 Mozilla 根证书
+- **musl 静态构建：sqlite-vec BSD 类型兼容** (#125)：在 CI musl 构建步骤中注入 `CFLAGS_<target>=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t`；`sqlite-vec v0.1.9` 的 C 源码使用了 POSIX 扩展类型 `u_int*_t`，这些类型在 musl libc 中不存在，通过 cc-rs 的 target-specific CFLAGS 机制注入宏定义使编译正常通过
+
+---
+
+## v1.7.1
+
+> 发布于 2026-05-12
+
+#### 功能
+
+- **Linux musl 静态构建支持** (#123)：新增 `x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl` 发布目标；将 sqlx 切换为 `tls-rustls` feature，彻底消除对 OpenSSL 运行时的依赖；在 `crypto/mod.rs` 中新增 `cfg(target_env = "musl")` 分支，通过环境变量 / 文件路径回退的方式解析主密钥（规避 musl 静态链接 dbus/libsecret 的问题）
+
+#### 修复
+
+- **ARM Linux sqlite-vec 扩展 ABI 修复** (#121)：在 `sqlite3_auto_extension` 注册调用中改用平台原生的 `c_char` / `c_int` 类型，确保符号签名与 aarch64 Linux 上的 libsqlite3-sys ABI 匹配
+
+#### 内部
+
+- 对整个代码库执行 `rustfmt` 统一格式化；在 `Makefile` 中新增 `make fmt` / `make fmt-check` 目标 (#124)
+
+---
+
+## v1.7.0
+
+> 发布于 2026-05-12
+
+#### 功能
+
+- **系统托盘生命周期修复** (#118)：关闭窗口时改为隐藏到托盘而非退出应用；修复 `TrayIcon` 因所有权提前释放导致托盘消失的 bug（通过 `app.manage()` 管理生命周期）；点击托盘图标可恢复窗口
+- **nyro-tools proxy 子命令重写** (#111)：将 `--upstream-protocol` + `--upstream-endpoint` 合并为单一 `--url`（`-u`）参数；自动检测并剥离出口 URL 中的客户端版本前缀；仅转发已知 LLM 入口路径；新增结构化 JSON 日志（含 UUID 关联 ID 和四种协议的 SSE 聚合）；新增 `-o/--output` 指定日志输出文件和 `-l/--log-mode`（all|req|resp）过滤模式
+- **Claude Code OAuth 重构接入** (#101)：新增 `auth/drivers/claude.rs` PKCE 驱动，通过 vendor-registry 流水线注册；新增 `anthropic/claude-code` channel，auth header 完全由 OAuth 驱动管理；引入 `compose_upstream_headers` 统一处理四处上游调用点的"OAuth 驱动优先于默认 auth"不变量；通过回归测试锁定该不变量
+- **Codex OAuth Provider 流程** (#58)：新增完整 OAuth 凭证支持、Codex OAuth channel，并接入代理与 Tauri 运行时
+- **三层 CI 测试金字塔** (#84)：Phase 1 — 协议转换单测（tool-call 片段、Anthropic 思考增量、DeepSeek reasoning、Responses 输出项、工具关联）；Phase 2 — 构建产物 job + L3 Ollama E2E（7 链路）；Phase 3 — L2 aimock 静态 E2E（4 隔离实例 / 8 测试用例）；Phase 4 — smoke 测试迁移至 `tests/e2e/`，新增 `storage-backends.yml`（pgvector 每日定时）
+- **Protocol / ProtocolEndpoint / Vendor 三概念正交模型** (#89–#97, #119)：用清晰的三层身份体系取代歧义的 `ProtocolFamily`——`Protocol`（枚举：`OpenAICompatible` / `OpenAIResponses` / `AnthropicMessages` / `GoogleGenerativeAI`）表示 wire-format 协议套件，`ProtocolEndpoint`（`{protocol, name, version}`）标识具体 API 端点，`Vendor` 复用现有 `Provider.vendor`；配置/JSON 使用规范短名（`openai-compat`、`openai-resps`、`anthropic-msgs`、`google-genai`）；三层 alias 表保障完全向后兼容（旧 canonical 字符串、遗留品牌名 `openai`/`claude`/`gemini`、短别名），无需数据迁移；`protocol_endpoints` JSON 升级为 protocol-keyed 格式（`base_url` 移至协议层、可选 `endpoints` 子集数组），首次读取时通过 `normalize_endpoints_json` 自动迁移
+- **上游响应头捕获入日志**：`call_non_stream` 返回类型升级为 `(Value, u16, HeaderMap)`，在 `.json()` 消费响应前保存响应头；三条代理路径（JSON 非流式、SSE 流式、force-stream）均捕获上游响应头并持久化至日志 `response_headers` 字段
+- **根路径健康检查端点**：`GET /` 和 `HEAD /` 均返回 `{"status":"ok"}`，支持默认使用 `HEAD /` 探活的负载均衡器和 Kubernetes liveness probe
+
+#### 重构
+
+- **Provider 层全面重构** (#107)：合并 `ProviderAdapter` + `VendorExtension` 为统一 `Vendor` trait（通过 `VendorRegistry`）；通过 `negotiate()` 激活 PassThrough 快速路径（ingress == egress 协议时跳过 IR 编解码往返）；`dispatch_pipeline` 接口改为 `RawEnvelope` + `AiRequest`；`dispatcher.rs` 拆分为 `mod.rs` + `util.rs` + `accumulator.rs`；`Gateway` 运行时字段从 `RwLock` 迁移至 `ArcSwap`，消除热路径 `.await`；CODEC_SCHEMA_VERSION 升至 2
+- **内核稳定化** (#104)：统一 `GatewayError` 分类体系（15 个变体，稳定错误码）；`RequestContext` 生命周期追踪；可观测性与安全鉴权逻辑从 `handler.rs` 拆分至独立模块；`dispatcher.rs` 整合为单一编排层
+- **OAuth 凭证存储** (#82)：将 OAuth 凭证拆分至专用 `provider_oauth_credentials` 表，实现 CAS 状态机（`connected` / `refreshing` / `error`）和乐观锁（`status_version`）；`OAuthCredentialStore` trait 提供 8 个方法，实现覆盖 SQLite、PostgreSQL、Memory 三端；将 `access_token` / `refresh_token` / `expires_at` 从 `Provider` 结构体移除；启动时自动迁移现有 OAuth 数据；后台刷新改为 `list_expiring()` + CAS 机制
+- **codec 目录按协议重新组织**：移除旧 `codec/openai/`、`codec/anthropic/`、`codec/google/` 目录；替换为完全自包含的 `codec/openai_compatible/`、`codec/openai_responses/`、`codec/anthropic_messages/`、`codec/google_generative/`
+- **Trait 与类型重命名**：`ProtocolHandler` → `EndpointHandler`；`ProtocolCapabilities` → `EndpointCapabilities`；`ProtocolRegistration` → `EndpointRegistration`；`list_by_family` → `list_by_protocol`；保留 `pub use` 向后兼容别名；移除 `ProtocolFamily` 和 `VendorScope::Family`
+- **authMode 字段规范化** (#73)：预设 JSON 字段 `auth_mode` → `authMode`，值 `"api_key"` → `"apikey"`，覆盖 JSON/DB/Rust/TypeScript；新增 SQLite/Postgres 启动迁移；调整 Provider 创建/编辑 OAuth 面板布局
+- **`protocol-id.ts` 替换为 `protocol.ts`**：新增 `PROTOCOL_TABLE`、`PROTOCOL_ALIASES`、`resolveProtocol`、`parseProtocolEndpoint`；`prettyName` 仅返回 Protocol 显示名；Providers/Connect/Routes 页面全面对齐规范 ID
+
+#### 修复
+
+- 修复协议转换过程中思考元数据丢失问题 (#114)
+- 修复 Anthropic 完整 usage 字段丢失；为 ZhipuAI/MiniMax 启用原生 passthrough (#115)
+- 修复流式 passthrough 错误传播与 `RawEvent` 转发 (#112)
+- `passthrough_run` 现正确将虚拟模型别名替换为 `actual_model` (#109)
+- 修复 DeepSeek 思考模式下 `reasoning_content` 在代理中丢失的问题 (#98)
+- 修复 OpenAI-compat vendor 在 Anthropic egress 时 URL 与鉴权头构造错误 (#105)
+- 修复 mlx-lm `reasoning` 字段名处理；非流式响应中正确包含 `reasoning_content` (#103)
+- 修复 Anthropic Thinking block 在网关中丢失的问题 (#90)
+- 修复 `text-slate-800` 在深色模式下对比度异常 (#100)
+- 修复运行时 Docker 构建缺失 lock 文件与目录 (#71)
+
+---
+
 ## v1.6.2
 
 > 发布于 2026-04-19
