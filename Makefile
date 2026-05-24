@@ -5,6 +5,9 @@ dev: webui-build
 	cargo tauri build --config src-tauri/tauri.dev.conf.json
 
 # Build desktop app (release)
+# IMPORTANT: Use "cargo tauri build" (or "make build"), NOT "cargo build -p nyro-desktop".
+# Plain cargo build skips tauri_build asset embedding — the binary will NOT include
+# the webui frontend, resulting in a white screen on launch.
 build: webui-build
 	cargo tauri build
 
