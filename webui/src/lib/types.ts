@@ -30,7 +30,6 @@ export interface Route {
   access_control: boolean;
   is_enabled: boolean;
   created_at: string;
-  route_type: string;
   targets: RouteTarget[];
 }
 

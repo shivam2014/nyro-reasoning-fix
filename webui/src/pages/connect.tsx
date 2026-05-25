@@ -677,7 +677,6 @@ export default function ConnectPage() {
           is_enabled: r.is_enabled,
           target_provider: r.target_provider,
           target_model: r.target_model,
-          route_type: r.route_type,
         })),
       }),
     onSuccess: () => {

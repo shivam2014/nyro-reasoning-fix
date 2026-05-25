@@ -711,7 +711,6 @@ pub struct RouteSyncInfo {
     pub is_enabled: bool,
     pub target_provider: String,
     pub target_model: String,
-    pub route_type: String,
 }
 
 #[tauri::command]
