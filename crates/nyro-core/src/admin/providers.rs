@@ -590,10 +590,22 @@ impl AdminService {
                     self.query_http_capability(provider, url, model).await
                 }
             }
-            CapabilitiesSource::Auto => Ok(fuzzy_match_models_dev(&self.gw.config.data_dir, model)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no matched model capabilities found in auto mode")
-                })?),
+            CapabilitiesSource::Auto => {
+                // First try models.dev fuzzy match
+                if let Some(caps) = fuzzy_match_models_dev(&self.gw.config.data_dir, model) {
+                    return Ok(caps);
+                }
+                // Fall back to querying the provider's own models endpoint
+                if let Some(url) = resolve_models_endpoint(provider) {
+                    if is_ollama_show_endpoint(&url) {
+                        self.query_ollama_show_capability(&url, model).await
+                    } else {
+                        self.query_http_capability(provider, &url, model).await
+                    }
+                } else {
+                    anyhow::bail!("no matched model capabilities found in auto mode")
+                }
+            }
         }
     }
 

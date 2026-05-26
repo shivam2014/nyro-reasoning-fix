@@ -378,6 +378,17 @@ pub(super) fn fuzzy_match_models_dev(data_dir: &Path, model: &str) -> Option<Mod
     match_models_dev_capability(&data, "", model)
 }
 
+/// Resolve the context window for a model from the models.dev runtime cache,
+/// falling back to 128000 if not found.
+pub fn resolve_model_context_window(
+    data_dir: &Path,
+    model: &str,
+) -> u64 {
+    fuzzy_match_models_dev(data_dir, model)
+        .map(|caps| caps.context_window)
+        .unwrap_or(128 * 1024)
+}
+
 fn match_models_dev_capability(
     data: &HashMap<String, ModelsDevVendor>,
     vendor_key: &str,

@@ -1,5 +1,5 @@
 use nyro_core::Gateway;
-use nyro_core::admin::{CopyProviderOptions, ProviderOAuthStatusData};
+use nyro_core::admin::{resolve_model_context_window, CopyProviderOptions, ProviderOAuthStatusData};
 use nyro_core::auth::{AuthExchangeInput, AuthSessionInitData, AuthSessionStatusData};
 use nyro_core::db::models::*;
 use serde::{Deserialize, Serialize};
@@ -715,6 +715,7 @@ pub struct RouteSyncInfo {
 
 #[tauri::command]
 pub async fn sync_cli_config(
+    gw: State<'_, Gateway>,
     app: tauri::AppHandle,
     tool_id: String,
     host: String,
@@ -845,6 +846,13 @@ pub async fn sync_cli_config(
             let mut model_entries = Vec::new();
             for route in &routes {
                 if !route.is_enabled { continue; }
+                let route_context_window = match gw.admin().get_model_capabilities(&route.target_provider, &route.target_model).await {
+                    Ok(caps) => caps.context_window,
+                    Err(_) => {
+                        // Fallback: try models.dev fuzzy match
+                        resolve_model_context_window(&gw.config.data_dir, &route.target_model)
+                    }
+                };
                 model_entries.push(serde_json::json!({
                     "slug": route.virtual_model,
                     "display_name": route.name,
@@ -856,8 +864,8 @@ pub async fn sync_cli_config(
                         {"effort": "medium", "description": "Balances speed and reasoning depth"},
                         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
                     ],
-                    "context_window": 128000,
-                    "max_context_window": 128000,
+                    "context_window": route_context_window,
+                    "max_context_window": route_context_window,
                     "effective_context_window_percent": 95,
                     "supports_parallel_tool_calls": true,
                     "supports_search_tool": false,
