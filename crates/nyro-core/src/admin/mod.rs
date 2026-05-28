@@ -34,7 +34,7 @@ mod settings;
 use auth_data::*;
 use model_catalog::*;
 pub use model_catalog::{
-    refresh_models_dev_runtime_cache_if_stale, refresh_models_dev_runtime_cache_on_startup, resolve_model_context_window,
+    refresh_models_dev_runtime_cache_if_stale, refresh_models_dev_runtime_cache_on_startup, resolve_model_context_window, resolve_model_input_modalities,
 };
 use route_data::*;
 

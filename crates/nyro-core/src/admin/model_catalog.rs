@@ -389,6 +389,28 @@ pub fn resolve_model_context_window(
         .unwrap_or(128 * 1024)
 }
 
+/// Resolve the input modalities for a model from the models.dev runtime cache.
+/// Filters to only "text" and "image" — the modalities that downstream CLI
+/// consumers (e.g. Codex) can deserialize. Audio/video are dropped here.
+/// Falls back to ["text"] if the model is not found.
+pub fn resolve_model_input_modalities(
+    data_dir: &Path,
+    model: &str,
+) -> Vec<String> {
+    let filtered: Vec<String> = fuzzy_match_models_dev(data_dir, model)
+        .map(|caps| caps.input_modalities)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m == "text" || m == "image")
+        .collect();
+    if filtered.is_empty() {
+        vec!["text".to_string()]
+    } else {
+        filtered
+    }
+}
+
+
 fn match_models_dev_capability(
     data: &HashMap<String, ModelsDevVendor>,
     vendor_key: &str,

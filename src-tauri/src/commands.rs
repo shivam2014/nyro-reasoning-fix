@@ -1,5 +1,5 @@
 use nyro_core::Gateway;
-use nyro_core::admin::{resolve_model_context_window, CopyProviderOptions, ProviderOAuthStatusData};
+use nyro_core::admin::{resolve_model_context_window, resolve_model_input_modalities, CopyProviderOptions, ProviderOAuthStatusData};
 use nyro_core::auth::{AuthExchangeInput, AuthSessionInitData, AuthSessionStatusData};
 use nyro_core::db::models::*;
 use serde::{Deserialize, Serialize};
@@ -846,11 +846,27 @@ pub async fn sync_cli_config(
             let mut model_entries = Vec::new();
             for route in &routes {
                 if !route.is_enabled { continue; }
-                let route_context_window = match gw.admin().get_model_capabilities(&route.target_provider, &route.target_model).await {
-                    Ok(caps) => caps.context_window,
+                let (route_context_window, route_input_modalities) = match gw.admin().get_model_capabilities(&route.target_provider, &route.target_model).await {
+                    Ok(caps) => {
+                        // Filter to text+image only — Codex InputModality enum
+                        // does not support audio/video.
+                        let modalities: Vec<String> = caps.input_modalities
+                            .into_iter()
+                            .filter(|m| m == "text" || m == "image")
+                            .collect();
+                        let modalities = if modalities.is_empty() {
+                            vec!["text".to_string()]
+                        } else {
+                            modalities
+                        };
+                        (caps.context_window, modalities)
+                    }
                     Err(_) => {
                         // Fallback: try models.dev fuzzy match
-                        resolve_model_context_window(&gw.config.data_dir, &route.target_model)
+                        (
+                            resolve_model_context_window(&gw.config.data_dir, &route.target_model),
+                            resolve_model_input_modalities(&gw.config.data_dir, &route.target_model),
+                        )
                     }
                 };
                 model_entries.push(serde_json::json!({
@@ -869,7 +885,7 @@ pub async fn sync_cli_config(
                     "effective_context_window_percent": 95,
                     "supports_parallel_tool_calls": true,
                     "supports_search_tool": false,
-                    "input_modalities": ["text"],
+                    "input_modalities": route_input_modalities,
                     "visibility": "list",
                     "priority": 10,
                     "shell_type": "shell_command",
