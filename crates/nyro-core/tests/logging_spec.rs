@@ -118,8 +118,8 @@ fn log_entry_timestamp_is_unix_millis() {
         upstream_protocol: "openai/chat/v1".into(),
         provider_id: "test-provider".into(),
         provider_name: "Test Provider".into(),
-        route_id: None,
-        route_name: None,
+        model_id: None,
+        model_name: None,
         upstream_url: None,
         client_model: "gpt-4".into(),
         upstream_model: "gpt-4".into(),
@@ -141,6 +141,7 @@ fn log_entry_timestamp_is_unix_millis() {
         is_stream: false,
         stream_chunks_count: 0,
         stream_first_chunk_ms: None,
+        enable_payload: None,
     };
 }
 
@@ -159,8 +160,8 @@ fn stream_indicator_via_chunks_count() {
         upstream_protocol: String::new(),
         provider_id: String::new(),
         provider_name: String::new(),
-        route_id: None,
-        route_name: None,
+        model_id: None,
+        model_name: None,
         upstream_url: None,
         client_model: String::new(),
         upstream_model: String::new(),
@@ -182,6 +183,7 @@ fn stream_indicator_via_chunks_count() {
         is_stream: false,
         stream_chunks_count: 0,
         stream_first_chunk_ms: None,
+        enable_payload: None,
     };
 
     // Non-streaming: chunks == 0
@@ -216,8 +218,8 @@ fn db_schema_sql_contains_new_columns() {
         "api_key_name",
         "provider_id",
         "provider_name",
-        "route_id",
-        "route_name",
+        "model_id",
+        "model_name",
         "client_protocol",
         "upstream_protocol",
         "upstream_url",
@@ -259,8 +261,8 @@ fn db_schema_sql_contains_new_columns() {
         let _: &Option<String> = &r.api_key_name;
         let _: &Option<String> = &r.provider_id;
         let _: &Option<String> = &r.provider_name;
-        let _: &Option<String> = &r.route_id;
-        let _: &Option<String> = &r.route_name;
+        let _: &Option<String> = &r.model_id;
+        let _: &Option<String> = &r.model_name;
         let _: &Option<String> = &r.client_protocol;
         let _: &Option<String> = &r.upstream_protocol;
         let _: &Option<String> = &r.upstream_url;

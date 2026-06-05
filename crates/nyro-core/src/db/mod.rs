@@ -28,6 +28,11 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::raw_sql(INIT_SQL).execute(pool).await?;
+
+    // Rename columns for MySQL compat: must happen before any code references new column names
+    rename_column_if_needed(pool, "settings", "key", "name").await?;
+    rename_column_if_needed(pool, "api_keys", "key", "token").await?;
+
     ensure_provider_column(pool, "vendor", "TEXT").await?;
     ensure_provider_column(pool, "preset_key", "TEXT").await?;
     ensure_provider_column(pool, "channel", "TEXT").await?;
@@ -39,7 +44,7 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_provider_column(pool, "use_proxy", "INTEGER DEFAULT 0").await?;
     migrate_collapse_provider_protocol_columns(pool).await?;
     ensure_route_column(pool, "virtual_model", "TEXT").await?;
-    ensure_route_column(pool, "strategy", "TEXT DEFAULT 'weighted'").await?;
+    ensure_route_column(pool, "balance", "TEXT DEFAULT 'weighted'").await?;
     ensure_route_column(pool, "access_control", "INTEGER DEFAULT 0").await?;
     ensure_request_log_column(pool, "api_key_id", "TEXT").await?;
     ensure_request_log_column(pool, "method", "TEXT").await?;
@@ -90,9 +95,41 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_request_log_column(pool, "is_stream", "INTEGER DEFAULT 0").await?;
     ensure_request_log_column(pool, "api_key_name", "TEXT").await?;
     ensure_request_log_column(pool, "provider_name", "TEXT").await?;
-    ensure_request_log_column(pool, "route_id", "TEXT").await?;
-    ensure_request_log_column(pool, "route_name", "TEXT").await?;
+    ensure_request_log_column(pool, "model_id", "TEXT").await?;
+    ensure_request_log_column(pool, "model_name", "TEXT").await?;
     ensure_request_log_column(pool, "cache_read_tokens", "INTEGER DEFAULT 0").await?;
+
+    // Rename tables: routes → models, route_targets → model_backends, api_key_routes → api_key_models
+    rename_table_if_needed(pool, "routes", "models").await?;
+    rename_table_if_needed(pool, "route_targets", "model_backends").await?;
+    rename_table_if_needed(pool, "api_key_routes", "api_key_models").await?;
+
+    // Rename columns within renamed tables
+    rename_column_if_needed(pool, "model_backends", "route_id", "model_id").await?;
+    rename_column_if_needed(pool, "api_key_models", "route_id", "model_id").await?;
+
+    // Rename columns: request_logs route_id/route_name → model_id/model_name
+    rename_column_if_needed(pool, "request_logs", "route_id", "model_id").await?;
+    rename_column_if_needed(pool, "request_logs", "route_name", "model_name").await?;
+
+    // Rename column: models strategy → balance
+    rename_column_if_needed(pool, "models", "strategy", "balance").await?;
+
+    // Merge virtual_model into name and drop the column
+    migrate_merge_virtual_model_into_name(pool).await?;
+
+    // Rename access_control → enable_auth on models table
+    rename_column_if_needed(pool, "models", "access_control", "enable_auth").await?;
+
+    // Add enable_payload column to models table
+    ensure_model_column(pool, "enable_payload", "INTEGER").await?;
+
+    // Rename settings key log_record_payloads → enable_payload
+    sqlx::query("UPDATE settings SET name = 'enable_payload' WHERE name = 'log_record_payloads'")
+        .execute(pool)
+        .await
+        .ok();
+
     Ok(())
 }
 
@@ -330,6 +367,19 @@ async fn ensure_route_column(
     Ok(())
 }
 
+async fn ensure_model_column(
+    pool: &SqlitePool,
+    column_name: &str,
+    definition: &str,
+) -> anyhow::Result<()> {
+    if !column_exists(pool, "models", column_name).await? {
+        let sql = format!("ALTER TABLE models ADD COLUMN {column_name} {definition}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
+
+    Ok(())
+}
+
 /// Idempotent migration: upgrade request_logs from the legacy 21-column schema
 /// to the spec-aligned 26-column schema.
 ///
@@ -478,7 +528,7 @@ async fn ensure_api_key_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS api_keys (
             id          TEXT PRIMARY KEY,
-            key         TEXT NOT NULL UNIQUE,
+            token       TEXT NOT NULL UNIQUE,
             name        TEXT NOT NULL,
             rpm         INTEGER,
             rpd         INTEGER,
@@ -503,7 +553,7 @@ async fn ensure_api_key_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key)")
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_token ON api_keys(token)")
         .execute(pool)
         .await?;
     sqlx::query(
@@ -568,7 +618,13 @@ async fn migrate_api_key_status_to_is_enabled(pool: &SqlitePool) -> anyhow::Resu
 }
 
 async fn backfill_route_fields(pool: &SqlitePool) -> anyhow::Result<()> {
-    if column_exists(pool, "routes", "strategy").await? {
+    if column_exists(pool, "models", "balance").await? {
+        sqlx::query(
+            "UPDATE models SET balance = 'weighted' WHERE balance IS NULL OR trim(balance) = ''",
+        )
+        .execute(pool)
+        .await?;
+    } else if column_exists(pool, "routes", "strategy").await? {
         sqlx::query(
             "UPDATE routes SET strategy = 'weighted' WHERE strategy IS NULL OR trim(strategy) = ''",
         )
@@ -663,6 +719,61 @@ async fn column_exists(
     }))
 }
 
+async fn table_exists(pool: &SqlitePool, table_name: &str) -> anyhow::Result<bool> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table_name})"))
+        .fetch_all(pool)
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn rename_table_if_needed(pool: &SqlitePool, old: &str, new: &str) -> anyhow::Result<()> {
+    if table_exists(pool, old).await? && !table_exists(pool, new).await? {
+        tracing::info!("renaming table {old} -> {new}");
+        sqlx::query(&format!("ALTER TABLE {old} RENAME TO {new}"))
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn rename_column_if_needed(
+    pool: &SqlitePool,
+    table: &str,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<()> {
+    if column_exists(pool, table, old).await? && !column_exists(pool, table, new).await? {
+        tracing::info!("renaming column {table}.{old} -> {table}.{new}");
+        sqlx::query(&format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new}"))
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn migrate_merge_virtual_model_into_name(pool: &SqlitePool) -> anyhow::Result<()> {
+    if !column_exists(pool, "models", "virtual_model").await? {
+        return Ok(());
+    }
+    tracing::info!("merging virtual_model into name on models table");
+    sqlx::query(
+        "UPDATE models SET name = TRIM(virtual_model)
+         WHERE virtual_model IS NOT NULL AND TRIM(virtual_model) != ''",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE models DROP COLUMN virtual_model")
+        .execute(pool)
+        .await?;
+    // Also clean up legacy match_pattern column if present
+    if column_exists(pool, "models", "match_pattern").await? {
+        sqlx::query("ALTER TABLE models DROP COLUMN match_pattern")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 const INIT_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS providers (
     id          TEXT PRIMARY KEY,
@@ -691,11 +802,11 @@ CREATE TABLE IF NOT EXISTS providers (
 CREATE TABLE IF NOT EXISTS routes (
     id                TEXT PRIMARY KEY,
     name              TEXT NOT NULL,
-    virtual_model     TEXT,
-    strategy          TEXT DEFAULT 'weighted',
+    balance           TEXT DEFAULT 'weighted',
     target_provider   TEXT NOT NULL REFERENCES providers(id),
     target_model      TEXT NOT NULL,
-    access_control    INTEGER DEFAULT 0,
+    enable_auth       INTEGER DEFAULT 0,
+    enable_payload    INTEGER,
     is_enabled        INTEGER DEFAULT 1,
     priority          INTEGER DEFAULT 0,
     created_at        TEXT DEFAULT (datetime('now'))
@@ -722,8 +833,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
     upstream_protocol         TEXT,
     provider_id               TEXT,
     provider_name             TEXT,
-    route_id                  TEXT,
-    route_name                TEXT,
+    model_id                  TEXT,
+    model_name                TEXT,
     upstream_url              TEXT,
     client_model              TEXT,
     upstream_model            TEXT,
@@ -750,7 +861,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 
 CREATE TABLE IF NOT EXISTS settings (
-    key        TEXT PRIMARY KEY,
+    name       TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );

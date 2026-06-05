@@ -35,28 +35,28 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
                 .map(|expires| !is_key_expired(expires))
                 .unwrap_or(true);
 
-        if key_active && let Ok(bound_route_ids) = store.list_bound_route_ids(&key_row.id).await {
+        if key_active && let Ok(bound_route_ids) = store.list_bound_model_ids(&key_row.id).await {
             accessible_route_ids.extend(bound_route_ids);
         }
     }
 
-    let cache = gw.route_cache.read().await;
-    let active_routes: Vec<_> = cache
-        .routes
+    // ── upstream: use model_cache with new naming ─────────────────────────────
+    let cache = gw.model_cache.read().await;
+    let active_models: Vec<_> = cache
+        .models
         .iter()
-        .filter(|route| !route.access_control || accessible_route_ids.contains(&route.id))
+        .filter(|model| !model.enable_auth || accessible_route_ids.contains(&model.id))
         .collect();
 
-    // Collect unique (provider_id, target_model) pairs for capability lookup
+    // ── fork: pre-fetch capabilities for all model targets ────────────────────
     let mut target_set: Vec<(String, String)> = Vec::new();
-    for route in &active_routes {
-        let pair = (route.target_provider.clone(), route.target_model.clone());
+    for model in &active_models {
+        let pair = (model.target_provider.clone(), model.target_model.clone());
         if !target_set.contains(&pair) {
             target_set.push(pair);
         }
     }
 
-    // Pre-fetch capabilities for all model targets
     let admin = gw.admin();
     let mut cap_map: HashMap<String, Option<ModelCapabilities>> = HashMap::new();
     for (provider_id, target_model) in &target_set {
@@ -64,10 +64,14 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
         cap_map.insert(target_model.clone(), caps);
     }
 
-    // Build model list with most capabilities from the route that matches
-    let models: BTreeSet<String> = active_routes.iter().map(|r| r.virtual_model.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    // ── upstream: collect model names ──────────────────────────────────────────
+    let model_names: BTreeSet<String> = active_models
+        .iter()
+        .map(|m| m.name.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
 
-    let data = models
+    let data = model_names
         .into_iter()
         .map(|model| {
             let mut obj = serde_json::json!({
@@ -77,9 +81,9 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
                 "owned_by": "Nyro"
             });
 
-            // Find the route for this virtual model and attach capabilities
-            if let Some(route) = active_routes.iter().find(|r| r.virtual_model.trim() == model) {
-                if let Some(Some(caps)) = cap_map.get(&route.target_model) {
+            // ── fork: attach capabilities from pre-fetched map ────────────────
+            if let Some(m) = active_models.iter().find(|m| m.name.trim() == model) {
+                if let Some(Some(caps)) = cap_map.get(&m.target_model) {
                     obj["max_context_length"] = serde_json::json!(caps.context_window);
                     if let Some(max_out) = caps.output_max_tokens {
                         obj["max_output_tokens"] = serde_json::json!(max_out);

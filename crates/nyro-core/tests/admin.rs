@@ -2,6 +2,7 @@ use nyro_core::Gateway;
 use nyro_core::admin::CopyProviderOptions;
 use nyro_core::config::GatewayConfig;
 use nyro_core::db::models::*;
+use nyro_core::storage::StorageBootstrap as _;
 
 use std::path::PathBuf;
 
@@ -68,27 +69,27 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
 
     let source_route = gw
         .admin()
-        .create_route(CreateRoute {
-            name: "source-route".to_string(),
-            virtual_model: "source-model".to_string(),
-            strategy: Some("priority".to_string()),
+        .create_model(CreateModel {
+            name: "source-model".to_string(),
+            balance: Some("priority".to_string()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![
-                CreateRouteTarget {
+                CreateModelBackend {
                     provider_id: original.id.clone(),
                     model: "source-upstream-model".to_string(),
                     weight: Some(80),
                     priority: Some(1),
                 },
-                CreateRouteTarget {
+                CreateModelBackend {
                     provider_id: fallback.id.clone(),
                     model: "fallback-upstream-model".to_string(),
                     weight: Some(20),
                     priority: Some(2),
                 },
             ],
-            access_control: Some(true),
+            enable_auth: Some(true),
+            enable_payload: None,
         })
         .await?;
 
@@ -103,43 +104,37 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
         .await?;
 
     assert!(!copied.is_enabled);
-    let routes = gw.admin().list_routes().await?;
+    let models = gw.admin().list_models().await?;
     assert_eq!(
-        routes.len(),
+        models.len(),
         1,
         "copying route targets must not create new routes"
     );
-    assert!(routes.iter().all(|route| route.name != "source-route_Copy"));
-    assert!(
-        routes
-            .iter()
-            .all(|route| route.virtual_model != "source-model_Copy")
-    );
+    assert!(models.iter().all(|model| model.name != "source-model_Copy"));
 
-    let updated_route = routes
+    let updated_model = models
         .iter()
-        .find(|route| route.id == source_route.id)
+        .find(|model| model.id == source_route.id)
         .expect("source route should remain");
-    assert_eq!(updated_route.name, "source-route");
-    assert_eq!(updated_route.virtual_model, "source-model");
-    assert_eq!(updated_route.strategy, "priority");
-    assert!(updated_route.access_control);
-    assert_eq!(updated_route.target_provider, original.id);
-    assert_eq!(updated_route.target_model, "source-upstream-model");
-    assert_eq!(updated_route.targets.len(), 3);
-    assert!(updated_route.targets.iter().any(|target| {
+    assert_eq!(updated_model.name, "source-model");
+    assert_eq!(updated_model.balance, "priority");
+    assert!(updated_model.enable_auth);
+    assert_eq!(updated_model.target_provider, original.id);
+    assert_eq!(updated_model.target_model, "source-upstream-model");
+    assert_eq!(updated_model.targets.len(), 3);
+    assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == original.id
             && target.model == "source-upstream-model"
             && target.weight == 80
             && target.priority == 1
     }));
-    assert!(updated_route.targets.iter().any(|target| {
+    assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == copied.id
             && target.model == "source-upstream-model"
             && target.weight == 80
             && target.priority == 1
     }));
-    assert!(updated_route.targets.iter().any(|target| {
+    assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == fallback.id
             && target.model == "fallback-upstream-model"
             && target.weight == 20
@@ -158,23 +153,23 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
         .await?;
 
     gw.admin()
-        .create_route(CreateRoute {
-            name: "no-route-copy-source".to_string(),
-            virtual_model: "no-route-copy-model".to_string(),
-            strategy: None,
+        .create_model(CreateModel {
+            name: "no-route-copy-model".to_string(),
+            balance: None,
             target_provider: original.id.clone(),
             target_model: "source-upstream-model".to_string(),
             targets: vec![],
-            access_control: None,
+            enable_auth: None,
+            enable_payload: None,
         })
         .await?;
 
     gw.admin().copy_provider(&original.id).await?;
 
-    let routes = gw.admin().list_routes().await?;
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].targets.len(), 1);
-    assert_eq!(routes[0].targets[0].provider_id, original.id);
+    let models = gw.admin().list_models().await?;
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].targets.len(), 1);
+    assert_eq!(models[0].targets[0].provider_id, original.id);
 
     Ok(())
 }
@@ -193,39 +188,39 @@ async fn delete_provider_removes_route_associations_before_provider() -> anyhow:
 
     let removed_route = gw
         .admin()
-        .create_route(CreateRoute {
-            name: "route-owned-by-deleted-provider".to_string(),
-            virtual_model: "route-owned-model".to_string(),
-            strategy: None,
+        .create_model(CreateModel {
+            name: "route-owned-model".to_string(),
+            balance: None,
             target_provider: removed_provider.id.clone(),
             target_model: "gpt-delete".to_string(),
             targets: vec![],
-            access_control: None,
+            enable_auth: None,
+            enable_payload: None,
         })
         .await?;
     let kept_route = gw
         .admin()
-        .create_route(CreateRoute {
-            name: "route-with-secondary-deleted-provider".to_string(),
-            virtual_model: "route-kept-model".to_string(),
-            strategy: None,
+        .create_model(CreateModel {
+            name: "route-kept-model".to_string(),
+            balance: None,
             target_provider: kept_provider.id.clone(),
             target_model: "gpt-keep".to_string(),
             targets: vec![
-                CreateRouteTarget {
+                CreateModelBackend {
                     provider_id: kept_provider.id.clone(),
                     model: "gpt-keep".to_string(),
                     weight: Some(100),
                     priority: Some(1),
                 },
-                CreateRouteTarget {
+                CreateModelBackend {
                     provider_id: removed_provider.id.clone(),
                     model: "gpt-delete-secondary".to_string(),
                     weight: Some(50),
                     priority: Some(2),
                 },
             ],
-            access_control: None,
+            enable_auth: None,
+            enable_payload: None,
         })
         .await?;
 
@@ -236,14 +231,14 @@ async fn delete_provider_removes_route_associations_before_provider() -> anyhow:
         "provider should be deleted after dependent route rows are removed"
     );
 
-    let routes = gw.admin().list_routes().await?;
+    let models = gw.admin().list_models().await?;
     assert!(
-        !routes.iter().any(|route| route.id == removed_route.id),
+        !models.iter().any(|model| model.id == removed_route.id),
         "routes whose primary provider was deleted should be removed"
     );
-    let kept_route = routes
+    let kept_route = models
         .iter()
-        .find(|route| route.id == kept_route.id)
+        .find(|model| model.id == kept_route.id)
         .expect("route with a different primary provider should remain");
     assert_eq!(kept_route.target_provider, kept_provider.id);
     assert!(
@@ -254,9 +249,9 @@ async fn delete_provider_removes_route_associations_before_provider() -> anyhow:
         "secondary route target associations for the deleted provider should be removed"
     );
 
-    let route_cache = gw.route_cache.read().await;
-    assert!(route_cache.match_route("route-owned-model").is_none());
-    assert!(route_cache.match_route("route-kept-model").is_some());
+    let model_cache = gw.model_cache.read().await;
+    assert!(model_cache.match_model("route-owned-model").is_none());
+    assert!(model_cache.match_model("route-kept-model").is_some());
 
     Ok(())
 }
@@ -312,6 +307,136 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
     };
     let (gw, _log_rx) = Gateway::new(config).await?;
     Ok(gw)
+}
+
+// ── config epoch tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+
+    let epoch_before: i64 = gw
+        .storage
+        .settings()
+        .get("config_epoch")
+        .await?
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let provider = gw
+        .admin()
+        .create_provider(api_key_provider_input("epoch-test-provider"))
+        .await?;
+    gw.admin()
+        .create_model(CreateModel {
+            name: "epoch-test-model".to_string(),
+            balance: Some("weighted".to_string()),
+            target_provider: provider.id.clone(),
+            target_model: "gpt-4".to_string(),
+            targets: vec![],
+            enable_auth: Some(false),
+            enable_payload: None,
+        })
+        .await?;
+
+    let epoch_after: i64 = gw
+        .storage
+        .settings()
+        .get("config_epoch")
+        .await?
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    assert!(
+        epoch_after > epoch_before,
+        "config_epoch should increment after create_model: before={epoch_before} after={epoch_after}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let provider = gw
+        .admin()
+        .create_provider(api_key_provider_input("epoch-update-provider"))
+        .await?;
+    let model = gw
+        .admin()
+        .create_model(CreateModel {
+            name: "epoch-update-model".to_string(),
+            balance: Some("weighted".to_string()),
+            target_provider: provider.id.clone(),
+            target_model: "gpt-4".to_string(),
+            targets: vec![],
+            enable_auth: Some(false),
+            enable_payload: None,
+        })
+        .await?;
+
+    let epoch_before_update: i64 = gw
+        .storage
+        .settings()
+        .get("config_epoch")
+        .await?
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    gw.admin()
+        .update_model(
+            &model.id,
+            UpdateModel {
+                is_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let epoch_after_update: i64 = gw
+        .storage
+        .settings()
+        .get("config_epoch")
+        .await?
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        epoch_after_update > epoch_before_update,
+        "epoch should increment on update"
+    );
+
+    gw.admin().delete_model(&model.id).await?;
+
+    let epoch_after_delete: i64 = gw
+        .storage
+        .settings()
+        .get("config_epoch")
+        .await?
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        epoch_after_delete > epoch_after_update,
+        "epoch should increment on delete"
+    );
+
+    Ok(())
+}
+
+// ── readyz (StorageBootstrap::health) ─────────────────────────────────────
+
+#[tokio::test]
+async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let health = gw.storage.bootstrap().health().await?;
+    assert!(
+        health.can_connect,
+        "SQLite health check should report can_connect"
+    );
+    Ok(())
 }
 
 fn test_data_dir() -> PathBuf {

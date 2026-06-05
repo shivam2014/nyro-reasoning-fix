@@ -25,7 +25,7 @@ mod non_stream;
 mod stream;
 mod util;
 use self::accumulator::*;
-use self::auth::{GatewayProxyAccessStore, authorize_route_access, get_provider};
+use self::auth::{GatewayProxyAccessStore, authorize_model_access, get_provider};
 use self::non_stream::{handle_non_stream, handle_non_stream_via_upstream_stream};
 use self::stream::handle_stream;
 use self::util::*;
@@ -97,8 +97,8 @@ pub async fn dispatch_pipeline(
     // ── Route lookup ─────────────────────────────────────────────────────────
 
     let route = {
-        let cache = gw.route_cache.read().await;
-        cache.match_route(&request_model).cloned()
+        let cache = gw.model_cache.read().await;
+        cache.match_model(&request_model).cloned()
     };
     let route = match route {
         Some(r) => r,
@@ -119,7 +119,7 @@ pub async fn dispatch_pipeline(
     // ── Auth ─────────────────────────────────────────────────────────────────
 
     let access_store = GatewayProxyAccessStore::new(&gw);
-    let auth_key = match authorize_route_access(&access_store, &route, &headers).await {
+    let auth_key = match authorize_model_access(&access_store, &route, &headers).await {
         Ok(v) => v,
         Err(resp) => {
             let status = resp.status().as_u16() as i32;
@@ -137,7 +137,7 @@ pub async fn dispatch_pipeline(
     let hook_registry = crate::integrations::HookRegistry::global();
     if hook_registry.has_request_hooks() {
         let hook_ctx = crate::integrations::HookContext {
-            route_id: route.id.clone(),
+            model_id: route.id.clone(),
             provider_name: String::new(),
             model: request.model.clone(),
             api_key_id: auth_key.id.clone(),
@@ -163,7 +163,7 @@ pub async fn dispatch_pipeline(
 
     // ── Target iteration ──────────────────────────────────────────────────────
 
-    let targets = load_route_targets(&gw, &route).await;
+    let targets = load_model_backends(&gw, &route).await;
     if targets.is_empty() {
         LogBuilder::from_dispatch(
             &gw,
@@ -178,7 +178,7 @@ pub async fn dispatch_pipeline(
         .emit();
         return error_response(503, "no route targets configured");
     }
-    let ordered_targets = TargetSelector::select_ordered(&route.strategy, &targets);
+    let ordered_targets = TargetSelector::select_ordered(&route.balance, &targets);
     if ordered_targets.is_empty() {
         LogBuilder::from_dispatch(
             &gw,
@@ -348,8 +348,8 @@ pub async fn dispatch_pipeline(
         let call_ctx = CallCtx {
             gw: gw.clone(),
             provider: &provider,
-            route_id: &route.id,
-            route_name: &route.name,
+            model_id: &route.id,
+            model_name: &route.name,
             egress,
             ingress,
             ingress_str: &ingress_str,
@@ -359,6 +359,7 @@ pub async fn dispatch_pipeline(
             api_key_id: auth_key.id.as_deref(),
             api_key_name: auth_key.name.as_deref(),
             is_stream,
+            enable_payload: route.enable_payload,
             start,
         };
         let response = if is_stream {
@@ -400,8 +401,8 @@ pub async fn dispatch_pipeline(
         if status < 400 {
             gw.health_registry.record_success(&target_key);
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            TargetSelector::record_selected(&route.strategy, &target_key);
-            TargetSelector::record_latency(&route.strategy, &target_key, elapsed_ms);
+            TargetSelector::record_selected(&route.balance, &target_key);
+            TargetSelector::record_latency(&route.balance, &target_key, elapsed_ms);
             return response;
         }
         gw.health_registry.record_failure(&target_key);
@@ -466,8 +467,8 @@ pub async fn dispatch(
 struct CallCtx<'a> {
     gw: Gateway,
     provider: &'a Provider,
-    route_id: &'a str,
-    route_name: &'a str,
+    model_id: &'a str,
+    model_name: &'a str,
     egress: ProtocolId,
     ingress: ProtocolId,
     ingress_str: &'a str,
@@ -477,6 +478,7 @@ struct CallCtx<'a> {
     api_key_id: Option<&'a str>,
     api_key_name: Option<&'a str>,
     is_stream: bool,
+    enable_payload: Option<bool>,
     start: Instant,
 }
 
@@ -510,9 +512,10 @@ struct LogBuilder {
     api_key_name: Option<String>,
     provider_id: String,
     provider_name: String,
-    route_id: Option<String>,
-    route_name: Option<String>,
+    model_id: Option<String>,
+    model_name: Option<String>,
     is_stream: bool,
+    enable_payload: Option<bool>,
     start: Instant,
     client_status_code: i32,
     usage: Usage,
@@ -532,9 +535,10 @@ impl LogBuilder {
             api_key_name: call_ctx.api_key_name.map(ToString::to_string),
             provider_id: call_ctx.provider.id.clone(),
             provider_name: call_ctx.provider.name.clone(),
-            route_id: Some(call_ctx.route_id.to_string()),
-            route_name: Some(call_ctx.route_name.to_string()),
+            model_id: Some(call_ctx.model_id.to_string()),
+            model_name: Some(call_ctx.model_name.to_string()),
             is_stream: call_ctx.is_stream,
+            enable_payload: call_ctx.enable_payload,
             start: call_ctx.start,
             client_status_code: 200,
             usage: Usage::default(),
@@ -562,9 +566,10 @@ impl LogBuilder {
             api_key_name: None,
             provider_id: String::new(),
             provider_name: String::new(),
-            route_id: None,
-            route_name: None,
+            model_id: None,
+            model_name: None,
             is_stream: false,
+            enable_payload: None,
             start,
             client_status_code: 200,
             usage: Usage::default(),
@@ -685,8 +690,8 @@ impl LogBuilder {
             upstream_protocol: self.upstream_protocol,
             provider_id: self.provider_id,
             provider_name: self.provider_name,
-            route_id: self.route_id,
-            route_name: self.route_name,
+            model_id: self.model_id,
+            model_name: self.model_name,
             upstream_url: self.extras.upstream_url,
             client_model: self.client_model,
             upstream_model: self.upstream_model,
@@ -708,6 +713,7 @@ impl LogBuilder {
             is_stream: self.is_stream,
             stream_chunks_count: self.extras.stream_chunks_count,
             stream_first_chunk_ms: self.extras.stream_first_chunk_ms,
+            enable_payload: self.enable_payload,
         };
         send_log(&self.gw, entry);
     }
@@ -716,7 +722,7 @@ impl LogBuilder {
 // ── Non-streaming / streaming handlers: see non_stream.rs and stream.rs ───────
 // ── Auth helpers: see auth.rs ─────────────────────────────────────────────
 
-// Utility helpers (is_retryable, runtime_binding_headers, load_route_targets,
+// Utility helpers (is_retryable, runtime_binding_headers, load_model_backends,
 // forwarded_client_headers) are in util.rs.
 
 fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStreamDelta> {
@@ -850,7 +856,7 @@ pub(crate) fn error_response(status: u16, message: &str) -> Response {
         403 => GatewayError::Forbidden {
             reason: crate::error::AccessDenial::Custom(message.to_string()),
         },
-        404 => GatewayError::RouteNotFound {
+        404 => GatewayError::ModelNotFound {
             model: message.to_string(),
         },
         429 => GatewayError::QuotaExceeded {

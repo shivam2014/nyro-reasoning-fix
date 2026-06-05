@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use sqlx::{Pool, Postgres};
+use sqlx::{MySql, Pool};
 use std::time::Duration;
 
 use crate::db::models::{
@@ -21,29 +21,27 @@ use crate::storage::traits::{
 };
 
 #[derive(Clone)]
-pub struct PostgresAdapter {
-    pool: Pool<Postgres>,
+pub struct MysqlAdapter {
+    pool: Pool<MySql>,
     config: SqlBackendConfig,
 }
 
 #[derive(Debug, Clone)]
-pub struct PostgresHealth {
+pub struct MysqlHealth {
     pub can_connect: bool,
     pub schema_compatible: bool,
 }
 
-impl PostgresAdapter {
+impl MysqlAdapter {
     pub async fn connect(config: SqlBackendConfig) -> anyhow::Result<Self> {
-        let pool = RelationalPool::connect(
-            crate::storage::sql::config::SqlBackendKind::Postgres,
-            &config,
-        )
-        .await
-        .context("connect postgres adapter")?;
+        let pool =
+            RelationalPool::connect(crate::storage::sql::config::SqlBackendKind::Mysql, &config)
+                .await
+                .context("connect mysql adapter")?;
         let pool = pool
-            .as_postgres()
+            .as_mysql()
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("relational pool kind mismatch: expected postgres"))?;
+            .ok_or_else(|| anyhow::anyhow!("relational pool kind mismatch: expected mysql"))?;
         Ok(Self { pool, config })
     }
 
@@ -51,7 +49,7 @@ impl PostgresAdapter {
         &self.config
     }
 
-    pub fn pool(&self) -> &Pool<Postgres> {
+    pub fn pool(&self) -> &Pool<MySql> {
         &self.pool
     }
 
@@ -60,9 +58,9 @@ impl PostgresAdapter {
         Ok(())
     }
 
-    pub async fn health(&self) -> PostgresHealth {
+    pub async fn health(&self) -> MysqlHealth {
         let can_connect = self.ping().await.is_ok();
-        PostgresHealth {
+        MysqlHealth {
             can_connect,
             schema_compatible: can_connect,
         }
@@ -70,32 +68,32 @@ impl PostgresAdapter {
 }
 
 #[derive(Clone)]
-pub struct PostgresStorage {
-    pool: Pool<Postgres>,
-    provider_store: Arc<PostgresProviderStore>,
-    model_store: Arc<PostgresModelStore>,
-    model_backend_store: Arc<PostgresModelBackendStore>,
-    settings_store: Arc<PostgresSettingsStore>,
-    api_key_store: Arc<PostgresApiKeyStore>,
-    auth_store: Arc<PostgresAuthAccessStore>,
-    oauth_credential_store: Arc<PostgresOAuthCredentialStore>,
-    log_store: Arc<PostgresLogStore>,
-    bootstrap: Arc<PostgresBootstrap>,
+pub struct MysqlStorage {
+    pool: Pool<MySql>,
+    provider_store: Arc<MysqlProviderStore>,
+    model_store: Arc<MysqlModelStore>,
+    model_backend_store: Arc<MysqlModelBackendStore>,
+    settings_store: Arc<MysqlSettingsStore>,
+    api_key_store: Arc<MysqlApiKeyStore>,
+    auth_store: Arc<MysqlAuthAccessStore>,
+    oauth_credential_store: Arc<MysqlOAuthCredentialStore>,
+    log_store: Arc<MysqlLogStore>,
+    bootstrap: Arc<MysqlBootstrap>,
 }
 
-impl PostgresStorage {
+impl MysqlStorage {
     pub async fn connect(config: SqlBackendConfig) -> anyhow::Result<Self> {
-        let adapter = PostgresAdapter::connect(config).await?;
+        let adapter = MysqlAdapter::connect(config).await?;
         let pool = adapter.pool().clone();
-        let provider_store = Arc::new(PostgresProviderStore { pool: pool.clone() });
-        let model_store = Arc::new(PostgresModelStore { pool: pool.clone() });
-        let model_backend_store = Arc::new(PostgresModelBackendStore { pool: pool.clone() });
-        let settings_store = Arc::new(PostgresSettingsStore { pool: pool.clone() });
-        let api_key_store = Arc::new(PostgresApiKeyStore { pool: pool.clone() });
-        let auth_store = Arc::new(PostgresAuthAccessStore { pool: pool.clone() });
-        let oauth_credential_store = Arc::new(PostgresOAuthCredentialStore { pool: pool.clone() });
-        let log_store = Arc::new(PostgresLogStore { pool: pool.clone() });
-        let bootstrap = Arc::new(PostgresBootstrap { adapter });
+        let provider_store = Arc::new(MysqlProviderStore { pool: pool.clone() });
+        let model_store = Arc::new(MysqlModelStore { pool: pool.clone() });
+        let model_backend_store = Arc::new(MysqlModelBackendStore { pool: pool.clone() });
+        let settings_store = Arc::new(MysqlSettingsStore { pool: pool.clone() });
+        let api_key_store = Arc::new(MysqlApiKeyStore { pool: pool.clone() });
+        let auth_store = Arc::new(MysqlAuthAccessStore { pool: pool.clone() });
+        let oauth_credential_store = Arc::new(MysqlOAuthCredentialStore { pool: pool.clone() });
+        let log_store = Arc::new(MysqlLogStore { pool: pool.clone() });
+        let bootstrap = Arc::new(MysqlBootstrap { adapter });
         Ok(Self {
             pool,
             provider_store,
@@ -110,12 +108,12 @@ impl PostgresStorage {
         })
     }
 
-    pub fn pool(&self) -> &Pool<Postgres> {
+    pub fn pool(&self) -> &Pool<MySql> {
         &self.pool
     }
 }
 
-impl Storage for PostgresStorage {
+impl Storage for MysqlStorage {
     fn providers(&self) -> &dyn ProviderStore {
         self.provider_store.as_ref()
     }
@@ -157,16 +155,20 @@ impl Storage for PostgresStorage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OAuth Credential Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresOAuthCredentialStore {
-    pool: Pool<Postgres>,
+struct MysqlOAuthCredentialStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl OAuthCredentialStore for PostgresOAuthCredentialStore {
+impl OAuthCredentialStore for MysqlOAuthCredentialStore {
     async fn get(&self, provider_id: &str) -> anyhow::Result<Option<OAuthCredential>> {
         Ok(sqlx::query_as::<_, OAuthCredential>(
-            "SELECT provider_id, driver_key, scheme, access_token, refresh_token, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error, to_char(last_refresh_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_refresh_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM provider_oauth_credentials WHERE provider_id = $1",
+            "SELECT provider_id, driver_key, scheme, access_token, refresh_token, DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%S') AS expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error, DATE_FORMAT(last_refresh_at, '%Y-%m-%d %H:%i:%S') AS last_refresh_at, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM provider_oauth_credentials WHERE provider_id = ?",
         )
         .bind(provider_id)
         .fetch_optional(&self.pool)
@@ -179,7 +181,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
         sqlx::query(
-            "INSERT INTO provider_oauth_credentials (provider_id, driver_key, scheme, access_token, refresh_token, expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'connected', 0, NULL) ON CONFLICT(provider_id) DO UPDATE SET driver_key=EXCLUDED.driver_key, scheme=EXCLUDED.scheme, access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token, expires_at=EXCLUDED.expires_at, resource_url=EXCLUDED.resource_url, subject_id=EXCLUDED.subject_id, scopes=EXCLUDED.scopes, meta=EXCLUDED.meta, status='connected', status_version=provider_oauth_credentials.status_version+1, last_error=NULL, updated_at=CURRENT_TIMESTAMP",
+            "INSERT INTO provider_oauth_credentials (provider_id, driver_key, scheme, access_token, refresh_token, expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', 0, NULL) ON DUPLICATE KEY UPDATE driver_key=VALUES(driver_key), scheme=VALUES(scheme), access_token=VALUES(access_token), refresh_token=VALUES(refresh_token), expires_at=VALUES(expires_at), resource_url=VALUES(resource_url), subject_id=VALUES(subject_id), scopes=VALUES(scopes), meta=VALUES(meta), status='connected', status_version=status_version+1, last_error=NULL, updated_at=NOW()",
         )
         .bind(provider_id)
         .bind(&input.driver_key)
@@ -199,7 +201,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
     }
 
     async fn delete(&self, provider_id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM provider_oauth_credentials WHERE provider_id = $1")
+        sqlx::query("DELETE FROM provider_oauth_credentials WHERE provider_id = ?")
             .bind(provider_id)
             .execute(&self.pool)
             .await?;
@@ -212,7 +214,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
         expected_version: i32,
     ) -> anyhow::Result<Option<OAuthCredential>> {
         let result = sqlx::query(
-            "UPDATE provider_oauth_credentials SET status='refreshing', status_version=status_version+1, updated_at=CURRENT_TIMESTAMP WHERE provider_id=$1 AND status='connected' AND status_version=$2",
+            "UPDATE provider_oauth_credentials SET status='refreshing', status_version=status_version+1, updated_at=NOW() WHERE provider_id=? AND status='connected' AND status_version=?",
         )
         .bind(provider_id)
         .bind(expected_version)
@@ -231,7 +233,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
         sqlx::query(
-            "UPDATE provider_oauth_credentials SET driver_key=$1, scheme=$2, access_token=$3, refresh_token=$4, expires_at=$5, resource_url=$6, subject_id=$7, scopes=$8, meta=$9, status='connected', status_version=status_version+1, last_error=NULL, last_refresh_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE provider_id=$10",
+            "UPDATE provider_oauth_credentials SET driver_key=?, scheme=?, access_token=?, refresh_token=?, expires_at=?, resource_url=?, subject_id=?, scopes=?, meta=?, status='connected', status_version=status_version+1, last_error=NULL, last_refresh_at=NOW(), updated_at=NOW() WHERE provider_id=?",
         )
         .bind(&input.driver_key)
         .bind(&input.scheme)
@@ -252,7 +254,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
 
     async fn fail_refresh(&self, provider_id: &str, error_message: &str) -> anyhow::Result<()> {
         sqlx::query(
-            "UPDATE provider_oauth_credentials SET status='error', last_error=$1, status_version=status_version+1, updated_at=CURRENT_TIMESTAMP WHERE provider_id=$2",
+            "UPDATE provider_oauth_credentials SET status='error', last_error=?, status_version=status_version+1, updated_at=NOW() WHERE provider_id=?",
         )
         .bind(error_message)
         .bind(provider_id)
@@ -264,7 +266,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
     async fn list_expiring(&self, before: Duration) -> anyhow::Result<Vec<OAuthCredential>> {
         let seconds = before.as_secs() as i64;
         Ok(sqlx::query_as::<_, OAuthCredential>(
-            "SELECT provider_id, driver_key, scheme, access_token, refresh_token, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error, to_char(last_refresh_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_refresh_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM provider_oauth_credentials WHERE status='connected' AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP + ($1 * INTERVAL '1 second')",
+            "SELECT provider_id, driver_key, scheme, access_token, refresh_token, DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%S') AS expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error, DATE_FORMAT(last_refresh_at, '%Y-%m-%d %H:%i:%S') AS last_refresh_at, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM provider_oauth_credentials WHERE status='connected' AND expires_at IS NOT NULL AND expires_at <= NOW() + INTERVAL ? SECOND",
         )
         .bind(seconds)
         .fetch_all(&self.pool)
@@ -274,7 +276,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
     async fn recover_stale_refreshing(&self, timeout: Duration) -> anyhow::Result<u64> {
         let seconds = timeout.as_secs() as i64;
         let result = sqlx::query(
-            "UPDATE provider_oauth_credentials SET status='error', last_error='refresh timeout: process did not complete within timeout', status_version=status_version+1, updated_at=CURRENT_TIMESTAMP WHERE status='refreshing' AND updated_at + ($1 * INTERVAL '1 second') < CURRENT_TIMESTAMP",
+            "UPDATE provider_oauth_credentials SET status='error', last_error='refresh timeout: process did not complete within timeout', status_version=status_version+1, updated_at=NOW() WHERE status='refreshing' AND updated_at + INTERVAL ? SECOND < NOW()",
         )
         .bind(seconds)
         .execute(&self.pool)
@@ -283,13 +285,17 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Provider Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresProviderStore {
-    pool: Pool<Postgres>,
+struct MysqlProviderStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl ProviderStore for PostgresProviderStore {
+impl ProviderStore for MysqlProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(&provider_select(None))
             .fetch_all(&self.pool)
@@ -298,7 +304,7 @@ impl ProviderStore for PostgresProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
         Ok(
-            sqlx::query_as::<_, Provider>(&provider_select(Some("WHERE id = $1")))
+            sqlx::query_as::<_, Provider>(&provider_select(Some("WHERE id = ?")))
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?,
@@ -313,7 +319,7 @@ impl ProviderStore for PostgresProviderStore {
             anyhow::bail!("unsupported provider auth_mode: {}", input.auth_mode);
         }
         sqlx::query(
-            "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, auth_mode, use_proxy) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, auth_mode, use_proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(input.name.trim())
@@ -361,7 +367,7 @@ impl ProviderStore for PostgresProviderStore {
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-            "UPDATE providers SET name=$1, vendor=$2, protocol=$3, base_url=$4, preset_key=$5, channel=$6, models_source=$7, static_models=$8, api_key=$9, auth_mode=$10, use_proxy=$11, is_enabled=$12, updated_at=CURRENT_TIMESTAMP WHERE id=$13",
+            "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, preset_key=?, channel=?, models_source=?, static_models=?, api_key=?, auth_mode=?, use_proxy=?, is_enabled=?, updated_at=NOW() WHERE id=?",
         )
         .bind(name.trim())
         .bind(vendor)
@@ -386,19 +392,20 @@ impl ProviderStore for PostgresProviderStore {
 
         sqlx::query(
             "DELETE FROM model_backends
-             WHERE provider_id = $1
-                OR model_id IN (SELECT id FROM models WHERE target_provider = $1)",
+             WHERE provider_id = ?
+                OR model_id IN (SELECT id FROM models WHERE target_provider = ?)",
         )
+        .bind(id)
         .bind(id)
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("DELETE FROM models WHERE target_provider = $1")
+        sqlx::query("DELETE FROM models WHERE target_provider = ?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query("DELETE FROM providers WHERE id = $1")
+        sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -410,7 +417,7 @@ impl ProviderStore for PostgresProviderStore {
     async fn exists_by_name(&self, name: &str, exclude_id: Option<&str>) -> anyhow::Result<bool> {
         let row = if let Some(exclude_id) = exclude_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM providers WHERE lower(trim(name)) = lower(trim($1)) AND id != $2 LIMIT 1",
+                "SELECT id FROM providers WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ? LIMIT 1",
             )
             .bind(name)
             .bind(exclude_id)
@@ -418,7 +425,7 @@ impl ProviderStore for PostgresProviderStore {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM providers WHERE lower(trim(name)) = lower(trim($1)) LIMIT 1",
+                "SELECT id FROM providers WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
             )
             .bind(name)
             .fetch_optional(&self.pool)
@@ -434,7 +441,7 @@ impl ProviderStore for PostgresProviderStore {
     ) -> anyhow::Result<()> {
         let _ = result.tested_at;
         sqlx::query(
-            "UPDATE providers SET last_test_success = $1, last_test_at = CURRENT_TIMESTAMP WHERE id = $2",
+            "UPDATE providers SET last_test_success = ?, last_test_at = NOW() WHERE id = ?",
         )
         .bind(result.success)
         .bind(provider_id)
@@ -444,13 +451,17 @@ impl ProviderStore for PostgresProviderStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Model Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresModelStore {
-    pool: Pool<Postgres>,
+struct MysqlModelStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl ModelStore for PostgresModelStore {
+impl ModelStore for MysqlModelStore {
     async fn list(&self) -> anyhow::Result<Vec<Model>> {
         Ok(
             sqlx::query_as::<_, Model>(&model_select(Some("ORDER BY created_at DESC")))
@@ -460,7 +471,7 @@ impl ModelStore for PostgresModelStore {
     }
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Model>> {
-        let sql = format!("{} WHERE id = $1", model_select(None));
+        let sql = format!("{} WHERE id = ?", model_select(None));
         Ok(sqlx::query_as::<_, Model>(&sql)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -470,7 +481,7 @@ impl ModelStore for PostgresModelStore {
     async fn create(&self, input: CreateModel) -> anyhow::Result<Model> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO models (id, name, balance, target_provider, target_model, enable_auth, enable_payload) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO models (id, name, balance, target_provider, target_model, enable_auth, enable_payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(input.name.trim())
@@ -495,7 +506,7 @@ impl ModelStore for PostgresModelStore {
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-            "UPDATE models SET name=$1, balance=$2, target_provider=$3, target_model=$4, enable_auth=$5, enable_payload=$6, is_enabled=$7 WHERE id=$8",
+            "UPDATE models SET name=?, balance=?, target_provider=?, target_model=?, enable_auth=?, enable_payload=?, is_enabled=? WHERE id=?",
         )
         .bind(name.trim())
         .bind(balance.trim().to_lowercase())
@@ -511,7 +522,7 @@ impl ModelStore for PostgresModelStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM models WHERE id = $1")
+        sqlx::query("DELETE FROM models WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -521,7 +532,7 @@ impl ModelStore for PostgresModelStore {
     async fn exists_by_name(&self, name: &str, exclude_id: Option<&str>) -> anyhow::Result<bool> {
         let row = if let Some(exclude_id) = exclude_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM models WHERE lower(trim(name)) = lower(trim($1)) AND id != $2 LIMIT 1",
+                "SELECT id FROM models WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ? LIMIT 1",
             )
             .bind(name)
             .bind(exclude_id)
@@ -529,7 +540,7 @@ impl ModelStore for PostgresModelStore {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM models WHERE lower(trim(name)) = lower(trim($1)) LIMIT 1",
+                "SELECT id FROM models WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
             )
             .bind(name)
             .fetch_optional(&self.pool)
@@ -540,28 +551,29 @@ impl ModelStore for PostgresModelStore {
 }
 
 #[async_trait]
-impl ModelSnapshotStore for PostgresModelStore {
+impl ModelSnapshotStore for MysqlModelStore {
     async fn load_active_snapshot(&self) -> anyhow::Result<Vec<Model>> {
-        let sql = format!(
-            "{} WHERE COALESCE(is_enabled, TRUE) = true",
-            model_select(None)
-        );
+        let sql = format!("{} WHERE COALESCE(is_enabled, 1) = 1", model_select(None));
         Ok(sqlx::query_as::<_, Model>(&sql)
             .fetch_all(&self.pool)
             .await?)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Model Backend Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresModelBackendStore {
-    pool: Pool<Postgres>,
+struct MysqlModelBackendStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl ModelBackendStore for PostgresModelBackendStore {
+impl ModelBackendStore for MysqlModelBackendStore {
     async fn list_backends_by_model(&self, model_id: &str) -> anyhow::Result<Vec<ModelBackend>> {
         Ok(sqlx::query_as::<_, ModelBackend>(
-            "SELECT id, model_id, provider_id, model, weight, priority, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at FROM model_backends WHERE model_id = $1 ORDER BY priority ASC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, weight, priority, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at FROM model_backends WHERE model_id = ? ORDER BY priority ASC, created_at ASC",
         )
         .bind(model_id)
         .fetch_all(&self.pool)
@@ -574,7 +586,7 @@ impl ModelBackendStore for PostgresModelBackendStore {
         backends: &[CreateModelBackend],
     ) -> anyhow::Result<Vec<ModelBackend>> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM model_backends WHERE model_id = $1")
+        sqlx::query("DELETE FROM model_backends WHERE model_id = ?")
             .bind(model_id)
             .execute(&mut *tx)
             .await?;
@@ -582,7 +594,7 @@ impl ModelBackendStore for PostgresModelBackendStore {
         for backend in backends {
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
-                "INSERT INTO model_backends (id, model_id, provider_id, model, weight, priority) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO model_backends (id, model_id, provider_id, model, weight, priority) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(model_id)
@@ -599,7 +611,7 @@ impl ModelBackendStore for PostgresModelBackendStore {
     }
 
     async fn delete_backends_by_model(&self, model_id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM model_backends WHERE model_id = $1")
+        sqlx::query("DELETE FROM model_backends WHERE model_id = ?")
             .bind(model_id)
             .execute(&self.pool)
             .await?;
@@ -607,15 +619,19 @@ impl ModelBackendStore for PostgresModelBackendStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Settings Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresSettingsStore {
-    pool: Pool<Postgres>,
+struct MysqlSettingsStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl SettingsStore for PostgresSettingsStore {
+impl SettingsStore for MysqlSettingsStore {
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE name = $1")
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE name = ?")
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
@@ -624,7 +640,7 @@ impl SettingsStore for PostgresSettingsStore {
 
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO settings (name, value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT(name) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at",
+            "INSERT INTO settings (name, value, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE value=VALUES(value), updated_at=NOW()",
         )
         .bind(key)
         .bind(value)
@@ -642,13 +658,17 @@ impl SettingsStore for PostgresSettingsStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// API Key Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresApiKeyStore {
-    pool: Pool<Postgres>,
+struct MysqlApiKeyStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl ApiKeyStore for PostgresApiKeyStore {
+impl ApiKeyStore for MysqlApiKeyStore {
     async fn list(&self) -> anyhow::Result<Vec<ApiKeyWithBindings>> {
         let rows = sqlx::query_as::<_, ApiKey>(&api_key_select(None))
             .fetch_all(&self.pool)
@@ -662,7 +682,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<ApiKeyWithBindings>> {
-        let row = sqlx::query_as::<_, ApiKey>(&api_key_select(Some("WHERE id = $1")))
+        let row = sqlx::query_as::<_, ApiKey>(&api_key_select(Some("WHERE id = ?")))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -677,7 +697,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let id = uuid::Uuid::new_v4().to_string();
         let key = format!("sk-{}", uuid::Uuid::new_v4().simple());
         sqlx::query(
-            "INSERT INTO api_keys (id, token, name, rpm, rpd, tpm, tpd, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::timestamptz)",
+            "INSERT INTO api_keys (id, token, name, rpm, rpd, tpm, tpd, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
         )
         .bind(&id)
         .bind(&key)
@@ -694,7 +714,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
-        let current = sqlx::query_as::<_, ApiKey>(&api_key_select(Some("WHERE id = $1")))
+        let current = sqlx::query_as::<_, ApiKey>(&api_key_select(Some("WHERE id = ?")))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
@@ -708,7 +728,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let expires_at = input.expires_at.or(current.expires_at);
 
         sqlx::query(
-            "UPDATE api_keys SET name=$1, rpm=$2, rpd=$3, tpm=$4, tpd=$5, is_enabled=$6, expires_at=NULLIF($7, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$8",
+            "UPDATE api_keys SET name=?, rpm=?, rpd=?, tpm=?, tpd=?, is_enabled=?, expires_at=NULLIF(?, ''), updated_at=NOW() WHERE id=?",
         )
         .bind(name.trim())
         .bind(rpm)
@@ -728,7 +748,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM api_keys WHERE id = $1")
+        sqlx::query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -738,7 +758,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     async fn exists_by_name(&self, name: &str, exclude_id: Option<&str>) -> anyhow::Result<bool> {
         let row = if let Some(exclude_id) = exclude_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM api_keys WHERE lower(trim(name)) = lower(trim($1)) AND id != $2 LIMIT 1",
+                "SELECT id FROM api_keys WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ? LIMIT 1",
             )
             .bind(name)
             .bind(exclude_id)
@@ -746,7 +766,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM api_keys WHERE lower(trim(name)) = lower(trim($1)) LIMIT 1",
+                "SELECT id FROM api_keys WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
             )
             .bind(name)
             .fetch_optional(&self.pool)
@@ -756,13 +776,17 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auth Access Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresAuthAccessStore {
-    pool: Pool<Postgres>,
+struct MysqlAuthAccessStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl AuthAccessStore for PostgresAuthAccessStore {
+impl AuthAccessStore for MysqlAuthAccessStore {
     async fn find_api_key(&self, raw_key: &str) -> anyhow::Result<Option<ApiKeyAccessRecord>> {
         let row = sqlx::query_as::<
             _,
@@ -777,7 +801,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 Option<i32>,
             ),
         >(
-            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm, rpd, tpm, tpd FROM api_keys WHERE token = $1",
+            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, 1) AS is_enabled, DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%S') AS expires_at, rpm, rpd, tpm, tpd FROM api_keys WHERE token = ?",
         )
         .bind(raw_key)
         .fetch_optional(&self.pool)
@@ -799,7 +823,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
 
     async fn model_binding_exists(&self, api_key_id: &str, model_id: &str) -> anyhow::Result<bool> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM api_key_models WHERE api_key_id = $1 AND model_id = $2",
+            "SELECT COUNT(*) FROM api_key_models WHERE api_key_id = ? AND model_id = ?",
         )
         .bind(api_key_id)
         .bind(model_id)
@@ -817,14 +841,17 @@ impl AuthAccessStore for PostgresAuthAccessStore {
         api_key_id: &str,
         window: UsageWindow,
     ) -> anyhow::Result<i64> {
-        let interval = interval_expr(window);
-        let sql = format!(
-            "SELECT COUNT(*) FROM request_logs WHERE api_key_id = $1 AND created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{interval}') * 1000"
-        );
-        Ok(sqlx::query_scalar::<_, i64>(&sql)
-            .bind(api_key_id)
-            .fetch_one(&self.pool)
-            .await?)
+        let seconds: i64 = match window {
+            UsageWindow::Minute => 60,
+            UsageWindow::Day => 86400,
+        };
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL ? SECOND) * 1000"
+        )
+        .bind(api_key_id)
+        .bind(seconds)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     async fn token_count_since(
@@ -832,24 +859,31 @@ impl AuthAccessStore for PostgresAuthAccessStore {
         api_key_id: &str,
         window: UsageWindow,
     ) -> anyhow::Result<i64> {
-        let interval = interval_expr(window);
-        let sql = format!(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM request_logs WHERE api_key_id = $1 AND created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{interval}') * 1000"
-        );
-        Ok(sqlx::query_scalar::<_, i64>(&sql)
-            .bind(api_key_id)
-            .fetch_one(&self.pool)
-            .await?)
+        let seconds: i64 = match window {
+            UsageWindow::Minute => 60,
+            UsageWindow::Day => 86400,
+        };
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(COALESCE(SUM(input_tokens + output_tokens), 0) AS SIGNED) FROM request_logs WHERE api_key_id = ? AND created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL ? SECOND) * 1000"
+        )
+        .bind(api_key_id)
+        .bind(seconds)
+        .fetch_one(&self.pool)
+        .await?)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Log Store
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresLogStore {
-    pool: Pool<Postgres>,
+struct MysqlLogStore {
+    pool: Pool<MySql>,
 }
 
 #[async_trait]
-impl LogStore for PostgresLogStore {
+impl LogStore for MysqlLogStore {
     async fn append_batch(&self, entries: Vec<LogEntry>) -> anyhow::Result<()> {
         for entry in entries {
             let id = uuid::Uuid::new_v4().to_string();
@@ -867,7 +901,7 @@ impl LogStore for PostgresLogStore {
                      latency_total_ms, latency_upstream_ms,
                      input_tokens, output_tokens, cache_read_tokens,
                      is_stream, stream_chunks_count, stream_first_chunk_ms)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)"#,
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
             )
             .bind(&id)
             .bind(entry.created_at)
@@ -912,51 +946,43 @@ impl LogStore for PostgresLogStore {
         let mut count_sql = String::from("SELECT COUNT(*) AS total FROM request_logs WHERE 1=1");
         // List query skips heavy body/header columns (NULL placeholders preserve struct layout).
         let mut data_sql = String::from(
-            "SELECT id, COALESCE(created_at::BIGINT, 0) AS created_at, api_key_id, api_key_name, \
+            "SELECT id, COALESCE(created_at, 0) AS created_at, api_key_id, api_key_name, \
              client_protocol, upstream_protocol, provider_id, provider_name, model_id, model_name, upstream_url, \
              client_model, upstream_model, method, path, \
-             NULL::text AS client_request_headers, NULL::text AS client_request_body, \
-             NULL::text AS client_response_headers, NULL::text AS client_response_body, \
-             NULL::text AS upstream_request_headers, NULL::text AS upstream_request_body, \
-             NULL::text AS upstream_response_headers, NULL::text AS upstream_response_body, \
+             CAST(NULL AS CHAR) AS client_request_headers, CAST(NULL AS CHAR) AS client_request_body, \
+             CAST(NULL AS CHAR) AS client_response_headers, CAST(NULL AS CHAR) AS client_response_body, \
+             CAST(NULL AS CHAR) AS upstream_request_headers, CAST(NULL AS CHAR) AS upstream_request_body, \
+             CAST(NULL AS CHAR) AS upstream_response_headers, CAST(NULL AS CHAR) AS upstream_response_body, \
              upstream_status_code, client_status_code, \
              latency_total_ms, latency_upstream_ms, \
              input_tokens, output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, \
-             COALESCE(is_stream, FALSE) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
+             COALESCE(is_stream, 0) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
              FROM request_logs WHERE 1=1",
         );
-        let mut idx = 1;
         let mut bind_values: Vec<String> = Vec::new();
 
         if let Some(provider) = query.provider.filter(|v| !v.is_empty()) {
-            count_sql.push_str(&format!(" AND provider_id = ${idx}"));
-            data_sql.push_str(&format!(" AND provider_id = ${idx}"));
+            count_sql.push_str(" AND provider_id = ?");
+            data_sql.push_str(" AND provider_id = ?");
             bind_values.push(provider);
-            idx += 1;
         }
         if let Some(model) = query.model.filter(|v| !v.is_empty()) {
-            count_sql.push_str(&format!(" AND upstream_model = ${idx}"));
-            data_sql.push_str(&format!(" AND upstream_model = ${idx}"));
+            count_sql.push_str(" AND upstream_model = ?");
+            data_sql.push_str(" AND upstream_model = ?");
             bind_values.push(model);
-            idx += 1;
         }
         if let Some(status_min) = query.status_min {
-            count_sql.push_str(&format!(" AND client_status_code >= ${idx}"));
-            data_sql.push_str(&format!(" AND client_status_code >= ${idx}"));
+            count_sql.push_str(" AND client_status_code >= ?");
+            data_sql.push_str(" AND client_status_code >= ?");
             bind_values.push(status_min.to_string());
-            idx += 1;
         }
         if let Some(status_max) = query.status_max {
-            count_sql.push_str(&format!(" AND client_status_code <= ${idx}"));
-            data_sql.push_str(&format!(" AND client_status_code <= ${idx}"));
+            count_sql.push_str(" AND client_status_code <= ?");
+            data_sql.push_str(" AND client_status_code <= ?");
             bind_values.push(status_max.to_string());
-            idx += 1;
         }
 
-        data_sql.push_str(&format!(
-            " ORDER BY created_at DESC LIMIT ${idx} OFFSET ${}",
-            idx + 1
-        ));
+        data_sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
 
         let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
         let mut data_query = sqlx::query_as::<_, RequestLog>(&data_sql);
@@ -976,7 +1002,7 @@ impl LogStore for PostgresLogStore {
 
     async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<RequestLog>> {
         let row = sqlx::query_as::<_, RequestLog>(
-            "SELECT id, COALESCE(created_at::BIGINT, 0) AS created_at, api_key_id, api_key_name, \
+            "SELECT id, COALESCE(created_at, 0) AS created_at, api_key_id, api_key_name, \
              client_protocol, upstream_protocol, provider_id, provider_name, model_id, model_name, upstream_url, \
              client_model, upstream_model, method, path, \
              client_request_headers, client_request_body, \
@@ -986,8 +1012,8 @@ impl LogStore for PostgresLogStore {
              upstream_status_code, client_status_code, \
              latency_total_ms, latency_upstream_ms, \
              input_tokens, output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, \
-             COALESCE(is_stream, FALSE) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
-             FROM request_logs WHERE id = $1",
+             COALESCE(is_stream, 0) AS is_stream, stream_chunks_count, stream_first_chunk_ms \
+             FROM request_logs WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -998,7 +1024,7 @@ impl LogStore for PostgresLogStore {
     async fn cleanup_before(&self, cutoff_expression: &str) -> anyhow::Result<u64> {
         let interval = cutoff_expression.trim().trim_start_matches('-').trim();
         let sql = format!(
-            "DELETE FROM request_logs WHERE created_at < EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{interval}') * 1000"
+            "DELETE FROM request_logs WHERE created_at < UNIX_TIMESTAMP(NOW() - INTERVAL '{interval}') * 1000"
         );
         let result = sqlx::query(&sql).execute(&self.pool).await?;
         Ok(result.rows_affected())
@@ -1007,10 +1033,10 @@ impl LogStore for PostgresLogStore {
     async fn stats_overview(&self, hours: Option<i64>) -> anyhow::Result<StatsOverview> {
         let sql = if let Some(hours) = hours {
             format!(
-                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs WHERE created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{hours} hours') * 1000"
+                "SELECT COUNT(*) AS total_requests, CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS total_input_tokens, CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS total_output_tokens, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms, CAST(COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count FROM request_logs WHERE created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL {hours} HOUR) * 1000"
             )
         } else {
-            "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs".to_string()
+            "SELECT COUNT(*) AS total_requests, CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS total_input_tokens, CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS total_output_tokens, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms, CAST(COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count FROM request_logs".to_string()
         };
         Ok(sqlx::query_as::<_, StatsOverview>(&sql)
             .fetch_one(&self.pool)
@@ -1019,7 +1045,7 @@ impl LogStore for PostgresLogStore {
 
     async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>> {
         let sql = format!(
-            "SELECT to_char(date_trunc('hour', to_timestamp(created_at/1000) AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:00:00') AS hour, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms FROM request_logs WHERE created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{hours} hours') * 1000 GROUP BY 1 ORDER BY 1 ASC"
+            "SELECT DATE_FORMAT(FROM_UNIXTIME(created_at/1000), '%Y-%m-%d %H:00:00') AS hour, COUNT(*) AS request_count, CAST(COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count, CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS total_input_tokens, CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS total_output_tokens, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms FROM request_logs WHERE created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL {hours} HOUR) * 1000 GROUP BY hour ORDER BY hour ASC"
         );
         Ok(sqlx::query_as::<_, StatsHourly>(&sql)
             .fetch_all(&self.pool)
@@ -1029,10 +1055,10 @@ impl LogStore for PostgresLogStore {
     async fn stats_by_model(&self, hours: Option<i64>) -> anyhow::Result<Vec<ModelStats>> {
         let sql = if let Some(hours) = hours {
             format!(
-                "SELECT upstream_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms FROM request_logs WHERE created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{hours} hours') * 1000 GROUP BY upstream_model ORDER BY request_count DESC"
+                "SELECT upstream_model AS model, COUNT(*) AS request_count, CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS total_input_tokens, CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS total_output_tokens, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms FROM request_logs WHERE created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL {hours} HOUR) * 1000 GROUP BY upstream_model ORDER BY request_count DESC"
             )
         } else {
-            "SELECT upstream_model AS model, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms FROM request_logs GROUP BY upstream_model ORDER BY request_count DESC".to_string()
+            "SELECT upstream_model AS model, COUNT(*) AS request_count, CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS total_input_tokens, CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS total_output_tokens, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms FROM request_logs GROUP BY upstream_model ORDER BY request_count DESC".to_string()
         };
         Ok(sqlx::query_as::<_, ModelStats>(&sql)
             .fetch_all(&self.pool)
@@ -1042,10 +1068,10 @@ impl LogStore for PostgresLogStore {
     async fn stats_by_provider(&self, hours: Option<i64>) -> anyhow::Result<Vec<ProviderStats>> {
         let sql = if let Some(hours) = hours {
             format!(
-                "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms FROM request_logs WHERE created_at >= EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - INTERVAL '{hours} hours') * 1000 GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC"
+                "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, CAST(COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms FROM request_logs WHERE created_at >= UNIX_TIMESTAMP(NOW() - INTERVAL {hours} HOUR) * 1000 GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC"
             )
         } else {
-            "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(AVG(latency_total_ms)::FLOAT8, 0) AS avg_duration_ms FROM request_logs GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC".to_string()
+            "SELECT COALESCE(provider_name, provider_id, '') AS provider, COUNT(*) AS request_count, CAST(COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count, CAST(COALESCE(AVG(latency_total_ms), 0) AS DOUBLE) AS avg_duration_ms FROM request_logs GROUP BY COALESCE(provider_name, provider_id, '') ORDER BY request_count DESC".to_string()
         };
         Ok(sqlx::query_as::<_, ProviderStats>(&sql)
             .fetch_all(&self.pool)
@@ -1053,224 +1079,208 @@ impl LogStore for PostgresLogStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-struct PostgresBootstrap {
-    adapter: PostgresAdapter,
+struct MysqlBootstrap {
+    adapter: MysqlAdapter,
 }
 
 #[async_trait]
-impl StorageBootstrap for PostgresBootstrap {
+impl StorageBootstrap for MysqlBootstrap {
     async fn init(&self) -> anyhow::Result<()> {
         self.adapter.ping().await
     }
 
     async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::raw_sql(POSTGRES_INIT_SQL)
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE routes ADD COLUMN IF NOT EXISTS balance TEXT DEFAULT 'weighted'")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query(
-            "UPDATE routes SET balance = 'weighted' WHERE balance IS NULL OR btrim(balance) = ''",
+        let pool = self.adapter.pool();
+
+        sqlx::raw_sql(MYSQL_INIT_SQL).execute(pool).await?;
+
+        // Add balance column to routes
+        mysql_add_column_if_not_exists(
+            pool,
+            "routes",
+            "balance",
+            "VARCHAR(255) DEFAULT 'weighted'",
         )
-        .execute(self.adapter.pool())
         .await?;
-        sqlx::query("ALTER TABLE providers ADD COLUMN IF NOT EXISTS use_proxy BOOLEAN NOT NULL DEFAULT FALSE")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE providers ADD COLUMN IF NOT EXISTS auth_mode TEXT NOT NULL DEFAULT 'apikey'")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE providers ADD COLUMN IF NOT EXISTS access_token TEXT")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE providers ADD COLUMN IF NOT EXISTS refresh_token TEXT")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE providers ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query("ALTER TABLE providers DROP CONSTRAINT IF EXISTS providers_auth_mode_check")
-            .execute(self.adapter.pool())
-            .await?;
+        sqlx::query(
+            "UPDATE routes SET balance = 'weighted' WHERE balance IS NULL OR TRIM(balance) = ''",
+        )
+        .execute(pool)
+        .await?;
+
+        // Add use_proxy to providers
+        mysql_add_column_if_not_exists(
+            pool,
+            "providers",
+            "use_proxy",
+            "TINYINT(1) NOT NULL DEFAULT 0",
+        )
+        .await?;
+
+        // Add auth_mode to providers
+        mysql_add_column_if_not_exists(
+            pool,
+            "providers",
+            "auth_mode",
+            "VARCHAR(255) NOT NULL DEFAULT 'apikey'",
+        )
+        .await?;
+
+        // Add OAuth columns to providers
+        mysql_add_column_if_not_exists(pool, "providers", "access_token", "TEXT").await?;
+        mysql_add_column_if_not_exists(pool, "providers", "refresh_token", "TEXT").await?;
+        mysql_add_column_if_not_exists(pool, "providers", "expires_at", "DATETIME").await?;
+
+        // Auth mode constraint: update api_key → apikey
         sqlx::query("UPDATE providers SET auth_mode = 'apikey' WHERE auth_mode = 'api_key'")
-            .execute(self.adapter.pool())
+            .execute(pool)
             .await?;
-        sqlx::query(
-            r#"DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'providers_auth_mode_check'
-    ) THEN
-        ALTER TABLE providers
-        ADD CONSTRAINT providers_auth_mode_check
-        CHECK (auth_mode IN ('apikey', 'oauth'));
-    END IF;
-END $$;"#,
-        )
-        .execute(self.adapter.pool())
-        .await?;
-        migrate_collapse_provider_protocol_columns_pg(self.adapter.pool()).await?;
+
+        // Collapse provider protocol columns (MySQL variant)
+        migrate_collapse_provider_protocol_columns_mysql(pool).await?;
+
+        // Backfill route_targets
         sqlx::query(
             r#"
-            INSERT INTO route_targets (id, route_id, provider_id, model, weight, priority)
-            SELECT md5(random()::text || clock_timestamp()::text), r.id, r.target_provider, r.target_model, 100, 1
+            INSERT IGNORE INTO route_targets (id, route_id, provider_id, model, weight, priority)
+            SELECT UUID(), r.id, r.target_provider, r.target_model, 100, 1
             FROM routes r
             WHERE r.target_provider IS NOT NULL
-              AND btrim(r.target_provider) != ''
+              AND TRIM(r.target_provider) != ''
               AND NOT EXISTS (SELECT 1 FROM route_targets rt WHERE rt.route_id = r.id)
             "#,
         )
-        .execute(self.adapter.pool())
+        .execute(pool)
         .await?;
+
         // Migrate: providers/routes is_active -> is_enabled
-        sqlx::query(
-            "ALTER TABLE providers ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE",
-        )
-        .execute(self.adapter.pool())
-        .await?;
-        sqlx::query("UPDATE providers SET is_enabled = is_active WHERE is_active IS NOT NULL AND is_enabled IS DISTINCT FROM is_active")
-            .execute(self.adapter.pool())
-            .await
-            .ok();
-        sqlx::query("ALTER TABLE routes ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE")
-            .execute(self.adapter.pool())
+        mysql_add_column_if_not_exists(pool, "providers", "is_enabled", "TINYINT(1) DEFAULT 1")
             .await?;
-        sqlx::query("UPDATE routes SET is_enabled = is_active WHERE is_active IS NOT NULL AND is_enabled IS DISTINCT FROM is_active")
-            .execute(self.adapter.pool())
+        sqlx::query("UPDATE providers SET is_enabled = is_active WHERE is_active IS NOT NULL AND is_enabled <> is_active")
+            .execute(pool)
             .await
             .ok();
+
+        mysql_add_column_if_not_exists(pool, "routes", "is_enabled", "TINYINT(1) DEFAULT 1")
+            .await?;
+        sqlx::query("UPDATE routes SET is_enabled = is_active WHERE is_active IS NOT NULL AND is_enabled <> is_active")
+            .execute(pool)
+            .await
+            .ok();
+
         // Migrate: api_keys status -> is_enabled
+        mysql_add_column_if_not_exists(pool, "api_keys", "is_enabled", "TINYINT(1) DEFAULT 1")
+            .await?;
         sqlx::query(
-            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE",
+            "UPDATE api_keys SET is_enabled = CASE WHEN status = 'active' THEN 1 ELSE 0 END \
+             WHERE status IS NOT NULL AND is_enabled <> (status = 'active')",
         )
-        .execute(self.adapter.pool())
-        .await?;
-        sqlx::query(
-            "UPDATE api_keys SET is_enabled = CASE WHEN status = 'active' THEN TRUE ELSE FALSE END \
-             WHERE status IS NOT NULL AND is_enabled IS DISTINCT FROM (status = 'active')",
-        )
-        .execute(self.adapter.pool())
+        .execute(pool)
         .await
         .ok();
+
         // Migrate OAuth credentials from providers table to new dedicated table
         sqlx::query(
             r#"
-            INSERT INTO provider_oauth_credentials
+            INSERT IGNORE INTO provider_oauth_credentials
                 (provider_id, access_token, refresh_token, expires_at, status)
             SELECT id, COALESCE(access_token, ''), refresh_token, expires_at, 'connected'
             FROM providers
             WHERE auth_mode = 'oauth'
               AND (
-                (access_token IS NOT NULL AND btrim(access_token) != '')
-                OR (refresh_token IS NOT NULL AND btrim(refresh_token) != '')
+                (access_token IS NOT NULL AND TRIM(access_token) != '')
+                OR (refresh_token IS NOT NULL AND TRIM(refresh_token) != '')
               )
-            ON CONFLICT DO NOTHING
             "#,
         )
-        .execute(self.adapter.pool())
+        .execute(pool)
         .await?;
-        // PR2B → PR13: vendor name migrations. Idempotent.
-        // `nyro → custom` (PR13 reversal), `zhipu → zhipuai` (PR2B).
+
+        // Vendor name migrations
         for (from, to) in [("nyro", "custom"), ("zhipu", "zhipuai")] {
-            sqlx::query("UPDATE providers SET vendor = $1 WHERE lower(btrim(vendor)) = $2")
+            sqlx::query("UPDATE providers SET vendor = ? WHERE LOWER(TRIM(vendor)) = ?")
                 .bind(to)
                 .bind(from)
-                .execute(self.adapter.pool())
+                .execute(pool)
                 .await?;
-            sqlx::query("UPDATE providers SET preset_key = $1 WHERE lower(btrim(preset_key)) = $2")
+            sqlx::query("UPDATE providers SET preset_key = ? WHERE LOWER(TRIM(preset_key)) = ?")
                 .bind(to)
                 .bind(from)
-                .execute(self.adapter.pool())
+                .execute(pool)
                 .await?;
         }
-        // PR4: rewrite provider protocol identifiers into canonical
-        // `family/dialect/version` form. Idempotent.
-        normalize_provider_protocols_pg(self.adapter.pool()).await?;
-        // Q2: drop route_type column (idempotent via IF EXISTS).
-        sqlx::query("ALTER TABLE routes DROP COLUMN IF EXISTS route_type")
-            .execute(self.adapter.pool())
-            .await?;
-        sqlx::query(
-            "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER DEFAULT 0",
+
+        // Protocol normalization (MySQL variant)
+        normalize_provider_protocols_mysql(pool).await?;
+
+        // Drop route_type column
+        if mysql_column_exists(pool, "routes", "route_type").await? {
+            sqlx::query("ALTER TABLE routes DROP COLUMN route_type")
+                .execute(pool)
+                .await?;
+        }
+
+        // Add cache_read_tokens
+        mysql_add_column_if_not_exists(
+            pool,
+            "request_logs",
+            "cache_read_tokens",
+            "INTEGER DEFAULT 0",
         )
-        .execute(self.adapter.pool())
         .await?;
 
         // Rename tables: routes → models, route_targets → model_backends, api_key_routes → api_key_models
-        pg_rename_table_if_needed(self.adapter.pool(), "routes", "models").await?;
-        pg_rename_table_if_needed(self.adapter.pool(), "route_targets", "model_backends").await?;
-        pg_rename_table_if_needed(self.adapter.pool(), "api_key_routes", "api_key_models").await?;
+        mysql_rename_table_if_needed(pool, "routes", "models").await?;
+        mysql_rename_table_if_needed(pool, "route_targets", "model_backends").await?;
+        mysql_rename_table_if_needed(pool, "api_key_routes", "api_key_models").await?;
 
         // Rename columns within renamed tables
-        pg_rename_column_if_needed(
-            self.adapter.pool(),
-            "model_backends",
-            "route_id",
-            "model_id",
-        )
-        .await?;
-        pg_rename_column_if_needed(
-            self.adapter.pool(),
-            "api_key_models",
-            "route_id",
-            "model_id",
-        )
-        .await?;
+        mysql_rename_column_if_needed(pool, "model_backends", "route_id", "model_id").await?;
+        mysql_rename_column_if_needed(pool, "api_key_models", "route_id", "model_id").await?;
 
         // Rename columns in request_logs: route_id → model_id, route_name → model_name
-        pg_rename_column_if_needed(self.adapter.pool(), "request_logs", "route_id", "model_id")
-            .await?;
-        pg_rename_column_if_needed(
-            self.adapter.pool(),
-            "request_logs",
-            "route_name",
-            "model_name",
-        )
-        .await?;
+        mysql_rename_column_if_needed(pool, "request_logs", "route_id", "model_id").await?;
+        mysql_rename_column_if_needed(pool, "request_logs", "route_name", "model_name").await?;
 
         // Rename column: models strategy → balance
-        pg_rename_column_if_needed(self.adapter.pool(), "models", "strategy", "balance").await?;
+        mysql_rename_column_if_needed(pool, "models", "strategy", "balance").await?;
 
         // Merge virtual_model into name and drop the column
-        if pg_column_exists(self.adapter.pool(), "models", "virtual_model").await? {
-            tracing::info!("merging virtual_model into name on models table (postgres)");
+        if mysql_column_exists(pool, "models", "virtual_model").await? {
+            tracing::info!("merging virtual_model into name on models table (mysql)");
             sqlx::query(
-                "UPDATE models SET name = BTRIM(virtual_model)
-                 WHERE virtual_model IS NOT NULL AND BTRIM(virtual_model) != ''",
+                "UPDATE models SET name = TRIM(virtual_model)
+                 WHERE virtual_model IS NOT NULL AND TRIM(virtual_model) != ''",
             )
-            .execute(self.adapter.pool())
+            .execute(pool)
             .await?;
             sqlx::query("ALTER TABLE models DROP COLUMN virtual_model")
-                .execute(self.adapter.pool())
+                .execute(pool)
                 .await?;
         }
 
         // Rename access_control → enable_auth on models table
-        pg_rename_column_if_needed(
-            self.adapter.pool(),
-            "models",
-            "access_control",
-            "enable_auth",
-        )
-        .await?;
-        sqlx::query("ALTER TABLE models ADD COLUMN IF NOT EXISTS enable_payload BOOLEAN")
-            .execute(self.adapter.pool())
+        mysql_rename_column_if_needed(pool, "models", "access_control", "enable_auth").await?;
+
+        mysql_add_column_if_not_exists(pool, "models", "enable_payload", "TINYINT(1) DEFAULT NULL")
             .await?;
+
         // Rename settings key log_record_payloads → enable_payload
         sqlx::query(
             "UPDATE settings SET name = 'enable_payload' WHERE name = 'log_record_payloads'",
         )
-        .execute(self.adapter.pool())
+        .execute(pool)
         .await
         .ok();
 
-        // Rename columns for MySQL compat: settings.key → settings.name, api_keys.key → api_keys.token
-        pg_rename_column_if_needed(self.adapter.pool(), "settings", "key", "name").await?;
-        pg_rename_column_if_needed(self.adapter.pool(), "api_keys", "key", "token").await?;
+        // Rename columns for compat: settings.key → settings.name, api_keys.key → api_keys.token
+        mysql_rename_column_if_needed(pool, "settings", "key", "name").await?;
+        mysql_rename_column_if_needed(pool, "api_keys", "key", "token").await?;
 
         Ok(())
     }
@@ -1278,7 +1288,7 @@ END $$;"#,
     async fn health(&self) -> anyhow::Result<StorageHealth> {
         let health = self.adapter.health().await;
         Ok(StorageHealth {
-            backend: StorageBackend::Postgres,
+            backend: StorageBackend::Mysql,
             can_connect: health.can_connect,
             schema_compatible: health.schema_compatible,
             writable: health.can_connect,
@@ -1286,13 +1296,94 @@ END $$;"#,
     }
 }
 
-/// Collapse removed provider protocol columns into `protocol` / `base_url`,
-/// then drop `default_protocol` and `protocol_endpoints`.
-async fn migrate_collapse_provider_protocol_columns_pg(
-    pool: &Pool<Postgres>,
+// ---------------------------------------------------------------------------
+// Migration helpers
+// ---------------------------------------------------------------------------
+
+async fn mysql_column_exists(
+    pool: &Pool<MySql>,
+    table_name: &str,
+    column_name: &str,
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(table_name)
+    .bind(column_name)
+    .fetch_one(pool)
+    .await?
+    > 0)
+}
+
+async fn mysql_table_exists(pool: &Pool<MySql>, table_name: &str) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+    )
+    .bind(table_name)
+    .fetch_one(pool)
+    .await?
+    > 0)
+}
+
+async fn mysql_rename_table_if_needed(
+    pool: &Pool<MySql>,
+    old: &str,
+    new: &str,
 ) -> anyhow::Result<()> {
-    let has_default_protocol = pg_column_exists(pool, "providers", "default_protocol").await?;
-    let has_protocol_endpoints = pg_column_exists(pool, "providers", "protocol_endpoints").await?;
+    if mysql_table_exists(pool, old).await? && !mysql_table_exists(pool, new).await? {
+        tracing::info!("renaming table {old} -> {new}");
+        sqlx::query(&format!("RENAME TABLE `{old}` TO `{new}`"))
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn mysql_rename_column_if_needed(
+    pool: &Pool<MySql>,
+    table: &str,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<()> {
+    if mysql_column_exists(pool, table, old).await?
+        && !mysql_column_exists(pool, table, new).await?
+    {
+        tracing::info!("renaming column {table}.{old} -> {table}.{new}");
+        sqlx::query(&format!(
+            "ALTER TABLE `{table}` RENAME COLUMN `{old}` TO `{new}`"
+        ))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn mysql_add_column_if_not_exists(
+    pool: &Pool<MySql>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> anyhow::Result<()> {
+    if !mysql_column_exists(pool, table, column).await? {
+        sqlx::query(&format!(
+            "ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}"
+        ))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Provider protocol collapse (MySQL variant)
+// ---------------------------------------------------------------------------
+
+async fn migrate_collapse_provider_protocol_columns_mysql(
+    pool: &Pool<MySql>,
+) -> anyhow::Result<()> {
+    let has_default_protocol = mysql_column_exists(pool, "providers", "default_protocol").await?;
+    let has_protocol_endpoints =
+        mysql_column_exists(pool, "providers", "protocol_endpoints").await?;
     if !has_default_protocol && !has_protocol_endpoints {
         return Ok(());
     }
@@ -1300,8 +1391,8 @@ async fn migrate_collapse_provider_protocol_columns_pg(
     if has_default_protocol {
         sqlx::query(
             "UPDATE providers \
-             SET protocol = btrim(default_protocol) \
-             WHERE default_protocol IS NOT NULL AND btrim(default_protocol) != ''",
+             SET protocol = TRIM(default_protocol) \
+             WHERE default_protocol IS NOT NULL AND TRIM(default_protocol) != ''",
         )
         .execute(pool)
         .await?;
@@ -1319,7 +1410,7 @@ async fn migrate_collapse_provider_protocol_columns_pg(
             if let Some(next_base_url) =
                 base_url_from_protocol_endpoints(raw_endpoints.as_deref().unwrap_or(""), &protocol)
             {
-                sqlx::query("UPDATE providers SET base_url = $1 WHERE id = $2")
+                sqlx::query("UPDATE providers SET base_url = ? WHERE id = ?")
                     .bind(next_base_url)
                     .bind(id)
                     .execute(pool)
@@ -1328,77 +1419,17 @@ async fn migrate_collapse_provider_protocol_columns_pg(
         }
     }
 
-    sqlx::query(
-        "ALTER TABLE providers \
-         DROP COLUMN IF EXISTS protocol_endpoints, \
-         DROP COLUMN IF EXISTS default_protocol",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-async fn pg_column_exists(
-    pool: &Pool<Postgres>,
-    table_name: &str,
-    column_name: &str,
-) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = $1
-              AND column_name = $2
-        )",
-    )
-    .bind(table_name)
-    .bind(column_name)
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn pg_table_exists(pool: &Pool<Postgres>, table_name: &str) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = current_schema()
-              AND table_name = $1
-        )",
-    )
-    .bind(table_name)
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn pg_rename_table_if_needed(
-    pool: &Pool<Postgres>,
-    old: &str,
-    new: &str,
-) -> anyhow::Result<()> {
-    if pg_table_exists(pool, old).await? && !pg_table_exists(pool, new).await? {
-        tracing::info!("renaming table {old} -> {new}");
-        sqlx::query(&format!("ALTER TABLE {old} RENAME TO {new}"))
+    if mysql_column_exists(pool, "providers", "protocol_endpoints").await? {
+        sqlx::query("ALTER TABLE providers DROP COLUMN protocol_endpoints")
             .execute(pool)
             .await?;
     }
-    Ok(())
-}
-
-async fn pg_rename_column_if_needed(
-    pool: &Pool<Postgres>,
-    table: &str,
-    old: &str,
-    new: &str,
-) -> anyhow::Result<()> {
-    if pg_column_exists(pool, table, old).await? && !pg_column_exists(pool, table, new).await? {
-        tracing::info!("renaming column {table}.{old} -> {table}.{new}");
-        sqlx::query(&format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new}"))
+    if mysql_column_exists(pool, "providers", "default_protocol").await? {
+        sqlx::query("ALTER TABLE providers DROP COLUMN default_protocol")
             .execute(pool)
             .await?;
     }
+
     Ok(())
 }
 
@@ -1433,16 +1464,14 @@ fn base_url_from_protocol_endpoints(raw: &str, protocol: &str) -> Option<String>
         tracing::warn!(
             protocol = protocol,
             skipped_entries = skipped,
-            "dropping non-selected protocol_endpoints entries during provider protocol collapse (postgres)"
+            "dropping non-selected protocol_endpoints entries during provider protocol collapse (mysql)"
         );
     }
     matched
 }
 
-/// Postgres counterpart of `crate::db::normalize_provider_protocols` —
-/// rewrites legacy / alias protocol identifiers in `providers.protocol` to
-/// canonical protocol-suite strings.
-async fn normalize_provider_protocols_pg(pool: &Pool<Postgres>) -> anyhow::Result<()> {
+/// MySQL counterpart of provider protocol normalization.
+async fn normalize_provider_protocols_mysql(pool: &Pool<MySql>) -> anyhow::Result<()> {
     use crate::protocol::registry::ProtocolRegistry;
 
     let reg = ProtocolRegistry::global();
@@ -1460,10 +1489,10 @@ async fn normalize_provider_protocols_pg(pool: &Pool<Postgres>) -> anyhow::Resul
             provider_id = %id,
             old_protocol = %raw_protocol,
             new_protocol = %new_protocol,
-            "normalizing provider protocol identifier (postgres)"
+            "normalizing provider protocol identifier (mysql)"
         );
 
-        sqlx::query("UPDATE providers SET protocol = $1 WHERE id = $2")
+        sqlx::query("UPDATE providers SET protocol = ? WHERE id = ?")
             .bind(&new_protocol)
             .bind(&id)
             .execute(pool)
@@ -1485,16 +1514,20 @@ fn normalize_provider_protocol_value(
         None => {
             tracing::warn!(
                 value = trimmed,
-                "leaving unrecognized provider protocol identifier unchanged (postgres)"
+                "leaving unrecognized provider protocol identifier unchanged (mysql)"
             );
             trimmed.to_string()
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Select helpers
+// ---------------------------------------------------------------------------
+
 fn provider_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, FALSE) AS use_proxy, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM providers",
+        "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, DATE_FORMAT(last_test_at, '%Y-%m-%d %H:%i:%S') AS last_test_at, COALESCE(is_enabled, 1) AS is_enabled, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM providers",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -1507,7 +1540,7 @@ fn provider_select(suffix: Option<&str>) -> String {
 
 fn model_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, name, COALESCE(balance, 'weighted') AS balance, target_provider, target_model, COALESCE(enable_auth, false) AS enable_auth, enable_payload, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at FROM models",
+        "SELECT id, name, COALESCE(balance, 'weighted') AS balance, target_provider, target_model, COALESCE(enable_auth, 0) AS enable_auth, enable_payload, COALESCE(is_enabled, 1) AS is_enabled, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at FROM models",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -1518,7 +1551,7 @@ fn model_select(suffix: Option<&str>) -> String {
 
 fn api_key_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, token, name, rpm, rpd, tpm, tpd, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
+        "SELECT id, token, name, rpm, rpd, tpm, tpd, COALESCE(is_enabled, 1) AS is_enabled, DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%S') AS expires_at, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%S') AS created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM api_keys",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -1553,19 +1586,12 @@ fn normalize_provider_vendor(vendor: Option<&str>) -> Option<String> {
         .map(|v| v.to_lowercase())
 }
 
-fn interval_expr(window: UsageWindow) -> &'static str {
-    match window {
-        UsageWindow::Minute => "1 minute",
-        UsageWindow::Day => "1 day",
-    }
-}
-
 async fn list_api_key_model_ids(
-    pool: &Pool<Postgres>,
+    pool: &Pool<MySql>,
     api_key_id: &str,
 ) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar::<_, String>(
-        "SELECT model_id FROM api_key_models WHERE api_key_id = $1 ORDER BY model_id ASC",
+        "SELECT model_id FROM api_key_models WHERE api_key_id = ? ORDER BY model_id ASC",
     )
     .bind(api_key_id)
     .fetch_all(pool)
@@ -1573,104 +1599,109 @@ async fn list_api_key_model_ids(
 }
 
 async fn replace_api_key_models(
-    pool: &Pool<Postgres>,
+    pool: &Pool<MySql>,
     api_key_id: &str,
     model_ids: &[String],
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM api_key_models WHERE api_key_id = $1")
+    sqlx::query("DELETE FROM api_key_models WHERE api_key_id = ?")
         .bind(api_key_id)
         .execute(&mut *tx)
         .await?;
 
     for model_id in model_ids.iter().filter(|id| !id.trim().is_empty()) {
-        sqlx::query(
-            "INSERT INTO api_key_models (api_key_id, model_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(api_key_id)
-        .bind(model_id.trim())
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("INSERT IGNORE INTO api_key_models (api_key_id, model_id) VALUES (?, ?)")
+            .bind(api_key_id)
+            .bind(model_id.trim())
+            .execute(&mut *tx)
+            .await?;
     }
 
     tx.commit().await?;
     Ok(())
 }
 
-const POSTGRES_INIT_SQL: &str = r#"
+// ---------------------------------------------------------------------------
+// DDL
+// ---------------------------------------------------------------------------
+
+const MYSQL_INIT_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS providers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    vendor TEXT,
-    protocol TEXT NOT NULL,
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    vendor VARCHAR(255),
+    protocol VARCHAR(255) NOT NULL,
     base_url TEXT NOT NULL,
-    preset_key TEXT,
-    channel TEXT,
+    preset_key VARCHAR(255),
+    channel VARCHAR(255),
     models_source TEXT,
     static_models TEXT,
     api_key TEXT NOT NULL,
-    auth_mode TEXT NOT NULL DEFAULT 'apikey' CHECK (auth_mode IN ('apikey', 'oauth')),
+    auth_mode VARCHAR(255) NOT NULL DEFAULT 'apikey',
     access_token TEXT,
     refresh_token TEXT,
-    expires_at TIMESTAMPTZ,
-    use_proxy BOOLEAN NOT NULL DEFAULT FALSE,
-    last_test_success BOOLEAN,
-    last_test_at TIMESTAMPTZ,
-    is_enabled BOOLEAN DEFAULT TRUE,
+    expires_at DATETIME,
+    use_proxy TINYINT(1) NOT NULL DEFAULT 0,
+    last_test_success TINYINT(1),
+    last_test_at DATETIME,
+    is_enabled TINYINT(1) DEFAULT 1,
     priority INTEGER DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS routes (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    balance TEXT DEFAULT 'weighted',
-    target_provider TEXT NOT NULL REFERENCES providers(id),
-    target_model TEXT NOT NULL,
-    enable_auth BOOLEAN DEFAULT FALSE,
-    enable_payload BOOLEAN,
-    is_enabled BOOLEAN DEFAULT TRUE,
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    balance VARCHAR(255) DEFAULT 'weighted',
+    target_provider VARCHAR(36) NOT NULL,
+    target_model VARCHAR(255) NOT NULL,
+    enable_auth TINYINT(1) DEFAULT 0,
+    enable_payload TINYINT(1) DEFAULT NULL,
+    is_enabled TINYINT(1) DEFAULT 1,
     priority INTEGER DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (target_provider) REFERENCES providers(id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS route_targets (
-    id TEXT PRIMARY KEY,
-    route_id TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
-    provider_id TEXT NOT NULL REFERENCES providers(id),
-    model TEXT NOT NULL,
+    id VARCHAR(36) PRIMARY KEY,
+    route_id VARCHAR(36) NOT NULL,
+    provider_id VARCHAR(36) NOT NULL,
+    model VARCHAR(255) NOT NULL,
     weight INTEGER DEFAULT 100,
     priority INTEGER DEFAULT 1,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
+    FOREIGN KEY (provider_id) REFERENCES providers(id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX IF NOT EXISTS idx_route_targets_route_id ON route_targets(route_id);
+CREATE INDEX idx_route_targets_route_id ON route_targets(route_id);
 
 CREATE TABLE IF NOT EXISTS request_logs (
-    id                        TEXT PRIMARY KEY,
+    id                        VARCHAR(36) PRIMARY KEY,
     created_at                BIGINT NOT NULL DEFAULT 0,
-    api_key_id                TEXT,
-    api_key_name              TEXT,
-    client_protocol           TEXT,
-    upstream_protocol         TEXT,
-    provider_id               TEXT,
-    provider_name             TEXT,
-    model_id                  TEXT,
-    model_name                TEXT,
+    api_key_id                VARCHAR(36),
+    api_key_name              VARCHAR(255),
+    client_protocol           VARCHAR(255),
+    upstream_protocol         VARCHAR(255),
+    provider_id               VARCHAR(36),
+    provider_name             VARCHAR(255),
+    model_id                  VARCHAR(36),
+    model_name                VARCHAR(255),
     upstream_url              TEXT,
-    client_model              TEXT,
-    upstream_model            TEXT,
-    method                    TEXT,
+    client_model              VARCHAR(255),
+    upstream_model            VARCHAR(255),
+    method                    VARCHAR(255),
     path                      TEXT,
     client_request_headers    TEXT,
-    client_request_body       TEXT,
+    client_request_body       LONGTEXT,
     client_response_headers   TEXT,
-    client_response_body      TEXT,
+    client_response_body      LONGTEXT,
     upstream_request_headers  TEXT,
-    upstream_request_body     TEXT,
+    upstream_request_body     LONGTEXT,
     upstream_response_headers TEXT,
-    upstream_response_body    TEXT,
+    upstream_response_body    LONGTEXT,
     upstream_status_code      INTEGER,
     client_status_code        INTEGER,
     latency_total_ms          BIGINT,
@@ -1678,65 +1709,68 @@ CREATE TABLE IF NOT EXISTS request_logs (
     input_tokens              INTEGER DEFAULT 0,
     output_tokens             INTEGER DEFAULT 0,
     cache_read_tokens         INTEGER DEFAULT 0,
-    is_stream                 BOOLEAN DEFAULT FALSE,
+    is_stream                 TINYINT(1) DEFAULT 0,
     stream_chunks_count       INTEGER DEFAULT 0,
     stream_first_chunk_ms     BIGINT
-);
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX IF NOT EXISTS idx_logs_created_at ON request_logs(created_at);
-CREATE INDEX IF NOT EXISTS idx_logs_provider_id ON request_logs(provider_id);
-CREATE INDEX IF NOT EXISTS idx_logs_client_status ON request_logs(client_status_code);
-CREATE INDEX IF NOT EXISTS idx_logs_upstream_model ON request_logs(upstream_model);
-CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key_id);
+CREATE INDEX idx_logs_created_at ON request_logs(created_at);
+CREATE INDEX idx_logs_provider_id ON request_logs(provider_id);
+CREATE INDEX idx_logs_client_status ON request_logs(client_status_code);
+CREATE INDEX idx_logs_upstream_model ON request_logs(upstream_model);
+CREATE INDEX idx_logs_api_key ON request_logs(api_key_id);
 
 CREATE TABLE IF NOT EXISTS settings (
-    name TEXT PRIMARY KEY,
+    name VARCHAR(255) PRIMARY KEY,
     value TEXT NOT NULL,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS api_keys (
-    id TEXT PRIMARY KEY,
-    token TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
+    id VARCHAR(36) PRIMARY KEY,
+    token VARCHAR(255) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
     rpm INTEGER,
     rpd INTEGER,
     tpm INTEGER,
     tpd INTEGER,
-    is_enabled BOOLEAN DEFAULT TRUE,
-    expires_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    is_enabled TINYINT(1) DEFAULT 1,
+    expires_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS api_key_routes (
-    api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
-    route_id TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
-    PRIMARY KEY (api_key_id, route_id)
-);
+    api_key_id VARCHAR(36) NOT NULL,
+    route_id VARCHAR(36) NOT NULL,
+    PRIMARY KEY (api_key_id, route_id),
+    FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE,
+    FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX IF NOT EXISTS idx_api_keys_token ON api_keys(token);
-CREATE INDEX IF NOT EXISTS idx_api_key_routes_route_id ON api_key_routes(route_id);
+CREATE INDEX idx_api_keys_token ON api_keys(token);
+CREATE INDEX idx_api_key_routes_route_id ON api_key_routes(route_id);
 
 CREATE TABLE IF NOT EXISTS provider_oauth_credentials (
-    provider_id       TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
-    driver_key        TEXT NOT NULL DEFAULT '',
-    scheme            TEXT NOT NULL DEFAULT '',
-    access_token      TEXT NOT NULL DEFAULT '',
+    provider_id       VARCHAR(36) PRIMARY KEY,
+    driver_key        TEXT NOT NULL,
+    scheme            VARCHAR(255) NOT NULL DEFAULT '',
+    access_token      TEXT NOT NULL,
     refresh_token     TEXT,
-    expires_at        TIMESTAMPTZ,
+    expires_at        DATETIME,
     resource_url      TEXT,
-    subject_id        TEXT,
-    scopes            TEXT NOT NULL DEFAULT '[]',
-    meta              TEXT NOT NULL DEFAULT '{}',
-    status            TEXT NOT NULL DEFAULT 'connected',
+    subject_id        VARCHAR(255),
+    scopes            TEXT NOT NULL,
+    meta              TEXT NOT NULL,
+    status            VARCHAR(255) NOT NULL DEFAULT 'connected',
     status_version    INTEGER NOT NULL DEFAULT 0,
     last_error        TEXT,
-    last_refresh_at   TIMESTAMPTZ,
-    created_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
+    last_refresh_at   DATETIME,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX IF NOT EXISTS idx_oauth_creds_status ON provider_oauth_credentials(status);
-CREATE INDEX IF NOT EXISTS idx_oauth_creds_expires ON provider_oauth_credentials(expires_at);
+CREATE INDEX idx_oauth_creds_status ON provider_oauth_credentials(status);
+CREATE INDEX idx_oauth_creds_expires ON provider_oauth_credentials(expires_at);
 "#;

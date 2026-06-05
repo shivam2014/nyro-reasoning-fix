@@ -51,7 +51,7 @@ Nyro 同时提供 **桌面应用**（macOS / Windows / Linux）和 **独立服�
 
 **切换提供商不改工具配置。** 在 Nyro UI 中更换目标模型或提供商即可，工具侧配置保持不变。
 
-**全程本地。** API Key 使用 AES-256-GCM 静态加密存储。请求仅在你的设备上流转，无云中转、无共享基础设施。
+**全程本地。** API Key 本地存储。请求仅在你的设备上流转，无云中转、无共享基础设施。
 
 **一个 UI 管全部。** 在同一界面管理提供商、路由、API Key、日志与用量统计，可在桌面应用或浏览器访问。
 
@@ -107,7 +107,6 @@ Nyro 同时提供 **桌面应用**（macOS / Windows / Linux）和 **独立服�
 
 ### 安全能力
 
-- AES-256-GCM 加密存储 API Key
 - 代理层与管理层 Bearer Token 独立控制
 - 默认拒绝策略：API Key 必须显式绑定路由才可访问
 - 单 Key 配额：RPM / RPD / TPM / TPD
@@ -214,14 +213,20 @@ chmod +x nyro-server-linux-x86_64
 
 打开 `http://localhost:19531` 进入管理界面。详细配置参见 [Server 文档](docs/server/README.md) 和 [Standalone 文档](docs/standalone/README.md)。
 
-### PostgreSQL 存储后端
+### SQL 存储后端
 
-默认使用 `--data-dir` 下的本地 SQLite。如需切换到 PostgreSQL：
+默认使用 `--data-dir` 下的本地 SQLite。如需切换到 PostgreSQL 或 MySQL：
 
 ```bash
+# PostgreSQL
 ./nyro-server-linux-x86_64 \
   --storage-backend postgres \
   --postgres-dsn "postgres://user:pass@host:5432/db"
+
+# MySQL
+./nyro-server-linux-x86_64 \
+  --storage-backend mysql \
+  --mysql-dsn "mysql://user:pass@host:3306/db"
 ```
 
 或通过环境变量：
@@ -229,6 +234,39 @@ chmod +x nyro-server-linux-x86_64
 ```bash
 export NYRO_POSTGRES_DSN="postgres://user:pass@host:5432/db"
 ./nyro-server-linux-x86_64 --storage-backend postgres
+
+# 或
+export NYRO_MYSQL_DSN="mysql://user:pass@host:3306/db"
+./nyro-server-linux-x86_64 --storage-backend mysql
+```
+
+### 多副本生产部署
+
+在负载均衡器后运行多个 `nyro-server` 副本时，所有副本**必须**共享同一数据库和相同的 admin token：
+
+| 要求 | 说明 |
+|---|---|
+| 共享数据库 | 使用 `--storage-backend postgres` 或 `mysql`，所有副本指向同一 DSN。SQLite 不支持共享。 |
+| 统一 admin token | 每个副本设置相同的 `--admin-token` / `NYRO_ADMIN_TOKEN`。 |
+| 配置同步 | 副本通过 `--config-poll-interval`（默认 3 秒）轮询共享 DB 的配置变更，路由/模型/Provider 的修改在一个轮询周期内传播。 |
+| OAuth 交互式流程 | OAuth 授权回调必须路由到**发起该 session 的同一副本**。请在负载均衡器的管理端口（`19531`）上配置 sticky session（会话亲和）。 |
+
+**健康探针：**
+
+| 端点 | 端口 | 用途 |
+|---|---|---|
+| `GET /healthz` | proxy + admin | Liveness — 固定返回 `200` |
+| `GET /readyz` | proxy + admin | Readiness — DB 可达返回 `200`，否则返回 `503` |
+
+**关键环境变量：**
+
+```bash
+NYRO_ADMIN_TOKEN=<secret>          # 当 admin host 不是 loopback 时必须设置
+NYRO_STORAGE_BACKEND=postgres      # postgres | mysql | sqlite（默认）
+NYRO_POSTGRES_DSN=postgres://...   # backend=postgres 时必须设置
+NYRO_MYSQL_DSN=mysql://...         # backend=mysql 时必须设置
+NYRO_CONFIG_POLL_INTERVAL=3        # 配置 epoch 轮询间隔（秒，默认 3，0=禁用）
+NYRO_WEBUI_DIR=/path/to/dist       # 从外部目录提供 WebUI（不填则使用嵌入资源）
 ```
 
 ### Docker
@@ -248,7 +286,7 @@ docker run --rm \
 
 打开 `http://127.0.0.1:19531` 进入管理界面。管理 API 请求时，请使用同一个 `NYRO_ADMIN_TOKEN` 作为 Bearer Token。
 
-如需使用 Postgres 后端或 `docker compose` 部署，请参考 [docker-nyro README](https://github.com/nyroway/docker-nyro)。
+如需使用 Postgres / MySQL 后端或 `docker compose` 部署，请参考 [docker-nyro README](https://github.com/nyroway/docker-nyro)。
 
 
 ---

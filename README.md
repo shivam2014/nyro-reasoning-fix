@@ -51,7 +51,7 @@ Nyro ships as a **desktop app** (macOS / Windows / Linux) and a **standalone ser
 
 **Switch providers without touching your tools.** Change the target model or provider from Nyro's UI. Your tools never need reconfiguring.
 
-**Keep everything local.** API keys are encrypted at rest with AES-256-GCM. Requests stay on your machine. No cloud relay, no shared infrastructure.
+**Keep everything local.** API keys are stored locally. Requests stay on your machine. No cloud relay, no shared infrastructure.
 
 **One UI for everything.** Manage providers, routes, API keys, logs, and usage stats from a single interface — desktop app or browser.
 
@@ -107,7 +107,6 @@ Nyro ships as a **desktop app** (macOS / Windows / Linux) and a **standalone ser
 
 ### Security
 
-- AES-256-GCM encrypted API key storage
 - Independent proxy and admin bearer token controls
 - Default-deny route authorization — keys must be explicitly bound to routes
 - Per-key quotas: RPM / RPD / TPM / TPD
@@ -214,14 +213,20 @@ Available server binaries: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `mac
 
 Open `http://localhost:19531` for the management UI. See [Server docs](docs/server/README.md) and [Standalone docs](docs/standalone/README.md) for full configuration reference.
 
-### PostgreSQL Storage Backend
+### SQL Storage Backends
 
-Default behavior: local SQLite under `--data-dir`. To use PostgreSQL:
+Default behavior: local SQLite under `--data-dir`. To use PostgreSQL or MySQL:
 
 ```bash
+# PostgreSQL
 ./nyro-server-linux-x86_64 \
   --storage-backend postgres \
   --postgres-dsn "postgres://user:pass@host:5432/db"
+
+# MySQL
+./nyro-server-linux-x86_64 \
+  --storage-backend mysql \
+  --mysql-dsn "mysql://user:pass@host:3306/db"
 ```
 
 Or via environment variable:
@@ -229,6 +234,39 @@ Or via environment variable:
 ```bash
 export NYRO_POSTGRES_DSN="postgres://user:pass@host:5432/db"
 ./nyro-server-linux-x86_64 --storage-backend postgres
+
+# or
+export NYRO_MYSQL_DSN="mysql://user:pass@host:3306/db"
+./nyro-server-linux-x86_64 --storage-backend mysql
+```
+
+### Multi-replica Production Deployment
+
+When running multiple `nyro-server` replicas behind a load balancer, all replicas **must** share the same database and the same admin token:
+
+| Requirement | Detail |
+|---|---|
+| Shared DB | Use `--storage-backend postgres` or `mysql` pointing to the same DSN across all replicas. SQLite cannot be shared. |
+| Unified admin token | Set the same `--admin-token` / `NYRO_ADMIN_TOKEN` on every replica. |
+| Config sync | Replicas poll the shared DB for config changes every `--config-poll-interval` seconds (default: 3 s). Route/model/provider changes propagate within one poll interval. |
+| OAuth interactive flows | The OAuth authorization callback must reach the **same replica** that initiated the session. Configure sticky sessions (session affinity) on your load balancer for the admin port (`19531`). |
+
+**Health probes:**
+
+| Endpoint | Port | Use |
+|---|---|---|
+| `GET /healthz` | proxy + admin | Liveness — always `200` |
+| `GET /readyz` | proxy + admin | Readiness — `200` if DB reachable, `503` otherwise |
+
+**Key environment variables:**
+
+```bash
+NYRO_ADMIN_TOKEN=<secret>          # Required when admin host is not loopback
+NYRO_STORAGE_BACKEND=postgres      # postgres | mysql | sqlite (default)
+NYRO_POSTGRES_DSN=postgres://...   # Required when backend=postgres
+NYRO_MYSQL_DSN=mysql://...         # Required when backend=mysql
+NYRO_CONFIG_POLL_INTERVAL=3        # Seconds between config epoch polls (default: 3, 0=disabled)
+NYRO_WEBUI_DIR=/path/to/dist       # Serve WebUI from external directory instead of embedded assets
 ```
 
 ### Docker
@@ -248,7 +286,7 @@ docker run --rm \
 
 Open `http://127.0.0.1:19531` for the management UI. Use the same `NYRO_ADMIN_TOKEN` value as the Bearer token for admin API requests.
 
-For Postgres-backed deployments and `docker compose` usage, see the [docker-nyro README](https://github.com/nyroway/docker-nyro).
+For Postgres- or MySQL-backed deployments and `docker compose` usage, see the [docker-nyro README](https://github.com/nyroway/docker-nyro).
 
 ---
 

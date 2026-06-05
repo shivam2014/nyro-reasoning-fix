@@ -106,26 +106,26 @@ pub struct UpsertOAuthCredential {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Route {
+pub struct Model {
     pub id: String,
     pub name: String,
-    #[serde(alias = "vmodel")]
-    pub virtual_model: String,
-    pub strategy: String,
+    pub balance: String,
     pub target_provider: String,
     pub target_model: String,
-    pub access_control: bool,
+    #[serde(alias = "access_control")]
+    pub enable_auth: bool,
+    pub enable_payload: Option<bool>,
     pub is_enabled: bool,
     pub created_at: String,
     #[serde(default)]
     #[sqlx(skip)]
-    pub targets: Vec<RouteTarget>,
+    pub targets: Vec<ModelBackend>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct RouteTarget {
+pub struct ModelBackend {
     pub id: String,
-    pub route_id: String,
+    pub model_id: String,
     pub provider_id: String,
     pub model: String,
     pub weight: i32,
@@ -136,7 +136,7 @@ pub struct RouteTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum RouteStrategy {
+pub enum ModelBalance {
     /// Weighted reservoir sampling — targets with higher weight are preferred.
     #[default]
     Weighted,
@@ -148,7 +148,7 @@ pub enum RouteStrategy {
     Latency,
 }
 
-impl RouteStrategy {
+impl ModelBalance {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Weighted => "weighted",
@@ -159,7 +159,7 @@ impl RouteStrategy {
     }
 }
 
-impl std::str::FromStr for RouteStrategy {
+impl std::str::FromStr for ModelBalance {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -168,7 +168,7 @@ impl std::str::FromStr for RouteStrategy {
             "priority" => Ok(Self::Priority),
             "cooldown" => Ok(Self::Cooldown),
             "latency" => Ok(Self::Latency),
-            other => anyhow::bail!("unsupported route strategy: {other}"),
+            other => anyhow::bail!("unsupported model balance: {other}"),
         }
     }
 }
@@ -176,7 +176,8 @@ impl std::str::FromStr for RouteStrategy {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ApiKey {
     pub id: String,
-    pub key: String,
+    #[serde(rename = "key")]
+    pub token: String,
     pub name: String,
     pub rpm: Option<i32>,
     pub rpd: Option<i32>,
@@ -191,7 +192,8 @@ pub struct ApiKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyWithBindings {
     pub id: String,
-    pub key: String,
+    #[serde(rename = "key")]
+    pub token: String,
     pub name: String,
     pub rpm: Option<i32>,
     pub rpd: Option<i32>,
@@ -201,7 +203,8 @@ pub struct ApiKeyWithBindings {
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub route_ids: Vec<String>,
+    #[serde(alias = "route_ids")]
+    pub model_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -216,8 +219,10 @@ pub struct RequestLog {
     pub upstream_protocol: Option<String>,
     pub provider_id: Option<String>,
     pub provider_name: Option<String>,
-    pub route_id: Option<String>,
-    pub route_name: Option<String>,
+    #[serde(alias = "route_id")]
+    pub model_id: Option<String>,
+    #[serde(alias = "route_name")]
+    pub model_name: Option<String>,
     pub upstream_url: Option<String>,
     pub client_model: Option<String>,
     pub upstream_model: Option<String>,
@@ -294,34 +299,38 @@ pub struct UpdateProvider {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UpdateRoute {
+pub struct UpdateModel {
+    #[serde(alias = "virtual_model", alias = "vmodel")]
     pub name: Option<String>,
-    #[serde(alias = "vmodel")]
-    pub virtual_model: Option<String>,
-    pub strategy: Option<String>,
+    #[serde(rename = "balance", alias = "strategy")]
+    pub balance: Option<String>,
     pub target_provider: Option<String>,
     pub target_model: Option<String>,
     #[serde(default)]
-    pub targets: Option<Vec<UpsertRouteTarget>>,
-    pub access_control: Option<bool>,
+    pub targets: Option<Vec<UpsertModelBackend>>,
+    #[serde(alias = "access_control")]
+    pub enable_auth: Option<bool>,
+    pub enable_payload: Option<Option<bool>>,
     pub is_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRoute {
+pub struct CreateModel {
+    #[serde(alias = "virtual_model", alias = "vmodel")]
     pub name: String,
-    #[serde(alias = "vmodel")]
-    pub virtual_model: String,
-    pub strategy: Option<String>,
+    #[serde(rename = "balance", alias = "strategy")]
+    pub balance: Option<String>,
     pub target_provider: String,
     pub target_model: String,
     #[serde(default)]
-    pub targets: Vec<CreateRouteTarget>,
-    pub access_control: Option<bool>,
+    pub targets: Vec<CreateModelBackend>,
+    #[serde(alias = "access_control")]
+    pub enable_auth: Option<bool>,
+    pub enable_payload: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRouteTarget {
+pub struct CreateModelBackend {
     pub provider_id: String,
     pub model: String,
     pub weight: Option<i32>,
@@ -329,7 +338,7 @@ pub struct CreateRouteTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpsertRouteTarget {
+pub struct UpsertModelBackend {
     pub id: Option<String>,
     pub provider_id: String,
     pub model: String,
@@ -345,8 +354,8 @@ pub struct CreateApiKey {
     pub tpm: Option<i32>,
     pub tpd: Option<i32>,
     pub expires_at: Option<String>,
-    #[serde(default)]
-    pub route_ids: Vec<String>,
+    #[serde(default, alias = "route_ids")]
+    pub model_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,7 +367,8 @@ pub struct UpdateApiKey {
     pub tpd: Option<i32>,
     pub is_enabled: Option<bool>,
     pub expires_at: Option<String>,
-    pub route_ids: Option<Vec<String>>,
+    #[serde(alias = "route_ids")]
+    pub model_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -440,7 +450,8 @@ pub struct ModelCapabilities {
 pub struct ExportData {
     pub version: u32,
     pub providers: Vec<ExportProvider>,
-    pub routes: Vec<ExportRoute>,
+    #[serde(alias = "routes")]
+    pub models: Vec<ExportModel>,
     pub settings: Vec<(String, String)>,
 }
 
@@ -468,19 +479,22 @@ pub struct ExportProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportRoute {
+pub struct ExportModel {
+    #[serde(alias = "virtual_model")]
     pub name: String,
-    pub virtual_model: String,
     pub target_model: String,
+    #[serde(alias = "access_control")]
+    pub enable_auth: bool,
     #[serde(default)]
-    pub access_control: bool,
+    pub enable_payload: Option<bool>,
     pub is_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportResult {
     pub providers_imported: u32,
-    pub routes_imported: u32,
+    #[serde(alias = "routes_imported")]
+    pub models_imported: u32,
     pub settings_imported: u32,
 }
 

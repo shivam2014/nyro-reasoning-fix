@@ -159,7 +159,7 @@ routes:
 | `type` | — | 否 | 路由类型：`chat`（默认）/ `embedding` |
 | `strategy` | — | 否 | 负载策略：`weighted`（默认）/ `priority` |
 | `targets` | — | 是 | 目标列表（至少一个） |
-| `access_control` | — | 否 | 是否启用访问控制（默认 `false`） |
+| `access_control` | — | 否 | 是否启用访问控制（默认 `false`）。别名 `enable_auth` |
 
 ### routes[].targets[]
 
@@ -249,6 +249,6 @@ CMD ["nyro-server", "--config", "/etc/nyro/config.yaml"]
 | Admin API | 完整 | 不启动 |
 | WebUI | 完整 | 不启动 |
 | 请求日志 | DB 存储 + WebUI 查看 | 仅 stdout |
-| 数据持久化 | SQLite / Postgres | 无（进程重启从 YAML 恢复） |
+| 数据持久化 | SQLite / Postgres / MySQL | 无（进程重启从 YAML 恢复） |
 | 缓存 | — | exact + semantic 缓存（内存） |
 | 部署依赖 | 二进制 + 存储目录 | 二进制 + YAML 文件 |

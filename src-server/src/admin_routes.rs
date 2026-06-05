@@ -46,7 +46,7 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .put(update_provider_handler)
         .delete(delete_provider_handler);
 
-    let routes_item = put(update_route_handler).delete(delete_route_handler);
+    let models_item = put(update_model_handler).delete(delete_model_handler);
     let api_keys_item = get(get_api_key_handler)
         .put(update_api_key_handler)
         .delete(delete_api_key_handler);
@@ -100,10 +100,16 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
             post(complete_oauth_session_handler),
         )
         .route(
-            "/routes",
-            get(list_routes_handler).post(create_route_handler),
+            "/models",
+            get(list_models_handler).post(create_model_handler),
         )
-        .route("/routes/:id", routes_item)
+        .route("/models/:id", models_item.clone())
+        // Deprecated: use /models instead
+        .route(
+            "/routes",
+            get(list_models_handler).post(create_model_handler),
+        )
+        .route("/routes/:id", models_item)
         .route(
             "/api-keys",
             get(list_api_keys_handler).post(create_api_key_handler),
@@ -119,7 +125,7 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .route("/status", get(get_status))
         .route("/config/export", get(export_config_handler))
         .route("/config/import", axum::routing::post(import_config_handler))
-        .with_state(gateway);
+        .with_state(gateway.clone());
 
     if let Some(token) = admin_token {
         if !token.is_empty() {
@@ -129,7 +135,28 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         }
     }
 
-    Router::new().nest("/api/v1", api)
+    // Health probes are unauthenticated so K8s/load-balancers can reach them
+    // without an admin token.
+    let health_routes = Router::new()
+        .route("/healthz", get(healthz_handler))
+        .route("/readyz", get(readyz_handler))
+        .with_state(gateway);
+
+    Router::new().merge(health_routes).nest("/api/v1", api)
+}
+
+async fn healthz_handler() -> impl IntoResponse {
+    (StatusCode::OK, r#"{"status":"ok"}"#)
+}
+
+async fn readyz_handler(State(gw): State<Gateway>) -> impl IntoResponse {
+    match gw.storage.bootstrap().health().await {
+        Ok(h) if h.can_connect => (StatusCode::OK, r#"{"status":"ok"}"#),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"status":"unavailable"}"#,
+        ),
+    }
 }
 
 // ── Providers ──
@@ -369,41 +396,41 @@ async fn bind_provider_oauth_handler(
     }
 }
 
-// ── Routes ──
+// ── Models ──
 
-async fn list_routes_handler(State(gw): State<Gateway>) -> impl IntoResponse {
-    match gw.admin().list_routes().await {
+async fn list_models_handler(State(gw): State<Gateway>) -> impl IntoResponse {
+    match gw.admin().list_models().await {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => err(e),
     }
 }
 
-async fn create_route_handler(
+async fn create_model_handler(
     State(gw): State<Gateway>,
-    Json(input): Json<CreateRoute>,
+    Json(input): Json<CreateModel>,
 ) -> impl IntoResponse {
-    match gw.admin().create_route(input).await {
+    match gw.admin().create_model(input).await {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => err(e),
     }
 }
 
-async fn update_route_handler(
-    State(gw): State<Gateway>,
-    Path(id): Path<String>,
-    Json(input): Json<UpdateRoute>,
-) -> impl IntoResponse {
-    match gw.admin().update_route(&id, input).await {
-        Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
-        Err(e) => err(e),
-    }
-}
-
-async fn delete_route_handler(
+async fn update_model_handler(
     State(gw): State<Gateway>,
     Path(id): Path<String>,
+    Json(input): Json<UpdateModel>,
 ) -> impl IntoResponse {
-    match gw.admin().delete_route(&id).await {
+    match gw.admin().update_model(&id, input).await {
+        Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn delete_model_handler(
+    State(gw): State<Gateway>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match gw.admin().delete_model(&id).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err(e),
     }

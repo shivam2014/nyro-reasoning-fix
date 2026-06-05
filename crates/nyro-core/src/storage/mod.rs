@@ -1,14 +1,16 @@
 pub mod memory;
+pub mod mysql;
 pub mod postgres;
 pub mod sql;
 pub mod sqlite;
 pub mod traits;
 
 pub use memory::MemoryStorage;
+pub use mysql::MysqlStorage;
 pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, DynStorage, LogStore, ProviderStore,
-    RouteSnapshotStore, RouteStore, RouteTargetStore, SettingsStore, Storage, StorageBootstrap,
+    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, DynStorage, LogStore, ModelBackendStore,
+    ModelSnapshotStore, ModelStore, ProviderStore, SettingsStore, Storage, StorageBootstrap,
     UsageWindow,
 };

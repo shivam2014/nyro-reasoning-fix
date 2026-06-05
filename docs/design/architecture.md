@@ -117,7 +117,6 @@ nyro/
 │           │   └── postgres/
 │           ├── db/
 │           ├── logging/
-│           ├── crypto/
 │           ├── cache/
 │           └── admin/                    # AdminService 管理面核心逻辑（按职责拆分）
 │               ├── mod.rs                # 公共类型、模块声明、AdminService 构造
@@ -458,24 +457,20 @@ trait VendorExtension: Send + Sync {
 
 ### 7.1 Route 模型
 
-路由唯一键为 `(ingress_protocol, virtual_model)`：
+路由唯一键为 `(ingress_protocol, name)`：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `name` | TEXT | 人类可读名称 |
+| `name` | TEXT | 人类可读名称，同时作为客户端请求的模型匹配键（路由唯一键的一部分） |
 | `ingress_protocol` | TEXT | 接入协议（canonical ProtocolId） |
-| `virtual_model` | TEXT | 客户端传入的 model 值，精确匹配 |
 | `target_provider` | TEXT FK | 目标模型提供商 |
 | `target_model` | TEXT | 实际调用的模型 |
-| `access_control` | BOOLEAN | 是否启用访问控制，默认 false |
+| `enable_auth` | BOOLEAN | 是否启用访问控制，默认 false |
+| `enable_payload` | BOOLEAN | 是否记录载荷（headers/bodies），NULL 时受全局开关控制 |
 | `is_active` | BOOLEAN | 路由启用状态，默认 true |
 
-虚拟模型名继承规则：`virtual_model = 用户填写 ?? target_model`
-
-两种使用模式：
-- **透明代理**：虚拟模型名 = 真实模型名，客户端代码与直连 Provider 完全一致
-- **抽象层**：虚拟模型名 ≠ 真实模型名，后端随时切换模型，客户端无感知
+`name` 同时承担显示名称和路由匹配键两个角色。当客户端请求中的 `model` 值与某条路由的 `name` 精确匹配时，该路由被命中，请求被转发到 `target_provider` 的 `target_model`。
 
 ### 7.2 API Key 模型
 
@@ -485,12 +480,12 @@ Route 与 API Key 是**独立管理、多对多绑定**的关系：
 API Key ──── (授权绑定) ──── Route
   │                            │
   ├── 配额: RPM / TPM / TPD     ├── 接入协议 (canonical ProtocolId)
-  ├── 过期时间                  ├── 虚拟模型名 (精确匹配)
+  ├── 过期时间                  ├── 模型名 (精确匹配)
   ├── 状态: active / revoked   ├── 目标提供商 + 目标模型
   └── 名称                      └── 访问控制开关
 ```
 
-Key 格式：`sk-<32位hex>`，AES-256-GCM 加密存储。
+Key 格式：`sk-<32位hex>`。
 
 ### 7.3 代理请求鉴权流程
 
@@ -499,7 +494,7 @@ Key 格式：`sk-<32位hex>`，AES-256-GCM 加密存储。
    (优先级: Authorization: Bearer > x-api-key)
 2. match(ingress_protocol, model) → Route
    └── 未匹配 → GatewayError::RouteNotFound (404)
-3. if route.access_control == false:
+3. if route.enable_auth == false:
    └── 直接放行
 4. if api_key 为空 → GatewayError::Unauthorized (401)
 5. 验证 api_key:
@@ -532,12 +527,13 @@ Provider 配置中通过 `modelsSource` / `capabilitiesSource` 声明数据来�
 
 ## 9. 存储与数据层
 
-### 9.1 双后端
+### 9.1 多后端
 
 | 后端 | 适用形态 | 路径 |
 |---|---|---|
 | SQLite | Desktop（单用户本地） | `crates/nyro-core/src/storage/sqlite/` |
 | PostgreSQL | Server（多用户自托管） | `crates/nyro-core/src/storage/postgres/` |
+| MySQL | Server（多用户自托管） | `crates/nyro-core/src/storage/mysql/` |
 
 统一接口定义在 `crates/nyro-core/src/storage/` 抽象层，上层代码不感知具体后端。
 
@@ -551,20 +547,19 @@ CREATE TABLE providers (
     vendor       TEXT,              -- canonical vendor_id（custom / openai / ...）
     protocol     TEXT NOT NULL,     -- canonical protocol suite（openai-compatible / ...）
     base_url     TEXT NOT NULL,
-    api_key      TEXT NOT NULL      -- AES-256-GCM 加密存储
+    api_key      TEXT NOT NULL      -- 明文存储
 );
 
 -- 路由规则
 CREATE TABLE routes (
     id                TEXT PRIMARY KEY,
-    name              TEXT NOT NULL,
+    name              TEXT NOT NULL,    -- 显示名称 + 路由匹配键
     ingress_protocol  TEXT NOT NULL,   -- canonical ProtocolId
-    virtual_model     TEXT NOT NULL,
     target_provider   TEXT NOT NULL REFERENCES providers(id),
     target_model      TEXT NOT NULL,
-    access_control    INTEGER NOT NULL DEFAULT 0,
+    access_control    INTEGER NOT NULL DEFAULT 0,  -- renamed to enable_auth
     is_active         INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(ingress_protocol, virtual_model)
+    UNIQUE(ingress_protocol, name)
 );
 
 -- 访问控制 Key
@@ -602,7 +597,6 @@ CREATE TABLE request_logs (
 
 ### 9.3 安全
 
-- Provider API Key 使用 AES-256-GCM 加密存储，密钥派生自本机唯一标识
 - Desktop 模式下管理 API 仅监听 `127.0.0.1`，外部不可访问
 - Server 模式下管理端口与代理端口独立，可配置鉴权
 

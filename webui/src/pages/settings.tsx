@@ -75,8 +75,8 @@ export default function SettingsPage() {
     queryFn: () => backend("get_setting", { key: "log_retention_days" }),
   });
   const { data: logRecordPayloadsSetting } = useQuery<string | null>({
-    queryKey: ["setting", "log_record_payloads"],
-    queryFn: () => backend("get_setting", { key: "log_record_payloads" }),
+    queryKey: ["setting", "enable_payload"],
+    queryFn: () => backend("get_setting", { key: "enable_payload" }),
   });
   const { data: proxyEnabledSetting } = useQuery<string | null>({
     queryKey: ["setting", "proxy_enabled"],
@@ -140,8 +140,8 @@ export default function SettingsPage() {
   });
   const saveLogRecordPayloads = useMutation({
     mutationFn: (value: boolean) =>
-      backend("set_setting", { key: "log_record_payloads", value: value ? "true" : "false" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["setting", "log_record_payloads"] }),
+      backend("set_setting", { key: "enable_payload", value: value ? "true" : "false" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["setting", "enable_payload"] }),
     onError: (error: unknown) => {
       showErrorDialog("保存设置失败", "Failed to save settings", error);
     },
@@ -353,12 +353,12 @@ export default function SettingsPage() {
             </div>
             <div className="space-y-1.5">
               <label className="ml-1 flex items-center gap-1 text-xs text-slate-700">
-                {isZh ? "记录 Payloads" : "Record Payloads"}
+                {isZh ? "记录载荷" : "Record Payloads"}
                 <HelpHint
                   text={
                     isZh
-                      ? "关闭后不再记录请求头、请求体、响应头和响应体"
-                      : "When off, request/response headers and bodies are no longer recorded"
+                      ? "总开关，关闭后所有模型均不记录载荷。开启后可在单个模型中按需关闭"
+                      : "Master switch — when off, no payloads are recorded. When on, individual models can opt out"
                   }
                 />
               </label>
@@ -404,7 +404,7 @@ export default function SettingsPage() {
         <h2 className="text-lg font-semibold text-slate-900">{isZh ? "配置备份" : "Config Backup"}</h2>
         <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-4 py-3">
           <p className="text-xs text-slate-500">
-            {isZh ? "导出或导入提供商、路由和设置" : "Export or import providers, routes & settings"}
+            {isZh ? "导出或导入提供商、模型和设置" : "Export or import providers, models & settings"}
           </p>
           <div className="ml-auto flex items-center gap-2">
             <Button
@@ -445,8 +445,8 @@ export default function SettingsPage() {
           {importMut.isSuccess && importMut.data && (
             <p className="w-full text-xs text-green-600">
               {isZh
-                ? `已导入：${(importMut.data as ImportResult).providers_imported} 个提供商，${(importMut.data as ImportResult).routes_imported} 条路由，${(importMut.data as ImportResult).settings_imported} 项设置`
-                : `Imported: ${(importMut.data as ImportResult).providers_imported} providers, ${(importMut.data as ImportResult).routes_imported} routes, ${(importMut.data as ImportResult).settings_imported} settings`}
+                ? `已导入：${(importMut.data as ImportResult).providers_imported} 个提供商，${(importMut.data as ImportResult).models_imported} 个模型，${(importMut.data as ImportResult).settings_imported} 项设置`
+                : `Imported: ${(importMut.data as ImportResult).providers_imported} providers, ${(importMut.data as ImportResult).models_imported} models, ${(importMut.data as ImportResult).settings_imported} settings`}
             </p>
           )}
         </div>

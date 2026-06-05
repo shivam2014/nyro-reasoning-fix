@@ -17,7 +17,8 @@ impl AdminService {
     pub async fn create_api_key(&self, input: CreateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
         let name = normalize_name(&input.name, "api key name")?;
         self.ensure_api_key_name_unique(None, &name).await?;
-        self.api_keys_store()?
+        let result = self
+            .api_keys_store()?
             .create(CreateApiKey {
                 name,
                 rpm: input.rpm,
@@ -25,9 +26,11 @@ impl AdminService {
                 tpm: input.tpm,
                 tpd: input.tpd,
                 expires_at: input.expires_at,
-                route_ids: input.route_ids,
+                model_ids: input.model_ids,
             })
-            .await
+            .await?;
+        self.bump_config_epoch().await?;
+        Ok(result)
     }
 
     pub async fn update_api_key(
@@ -50,7 +53,8 @@ impl AdminService {
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
         let expires_at = input.expires_at.or(current.expires_at);
 
-        self.api_keys_store()?
+        let result = self
+            .api_keys_store()?
             .update(
                 id,
                 UpdateApiKey {
@@ -61,14 +65,17 @@ impl AdminService {
                     tpd,
                     is_enabled: Some(is_enabled),
                     expires_at,
-                    route_ids: input.route_ids,
+                    model_ids: input.model_ids,
                 },
             )
-            .await
+            .await?;
+        self.bump_config_epoch().await?;
+        Ok(result)
     }
 
     pub async fn delete_api_key(&self, id: &str) -> anyhow::Result<()> {
         self.api_keys_store()?.delete(id).await?;
+        self.bump_config_epoch().await?;
         Ok(())
     }
     async fn ensure_api_key_name_unique(

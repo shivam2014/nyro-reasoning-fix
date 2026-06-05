@@ -16,7 +16,9 @@ use nyro_core::{
     storage::MemoryStorage,
 };
 use rust_embed::RustEmbed;
+use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 
 mod admin_routes;
 mod yaml_config;
@@ -104,7 +106,7 @@ struct Args {
     )]
     data_dir: String,
 
-    #[arg(long, value_parser = ["sqlite", "postgres"], default_value = "sqlite",
+    #[arg(long, value_parser = ["sqlite", "postgres", "mysql"], default_value = "sqlite",
           env = "NYRO_STORAGE_BACKEND", help_heading = "Storage")]
     storage_backend: String,
 
@@ -143,25 +145,60 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Postgres: connection acquire timeout (seconds)",
-        help_heading = "Storage"
-    )]
-    postgres_acquire_timeout: u64,
-
-    #[arg(
-        long,
         help = "Postgres: idle connection timeout (seconds)",
         help_heading = "Storage"
     )]
     postgres_idle_timeout: Option<u64>,
 
+    // ── MySQL ────────────────────────────────────────────────────────────────
     #[arg(
         long,
-        help = "Postgres: max connection lifetime (seconds)",
+        env = "NYRO_MYSQL_DSN",
+        help = "MySQL connection string (required when --storage-backend=mysql)",
         help_heading = "Storage"
     )]
-    postgres_max_lifetime: Option<u64>,
+    mysql_dsn: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "MySQL: max connection pool size",
+        help_heading = "Storage"
+    )]
+    mysql_max_connections: u32,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "MySQL: min connection pool size",
+        help_heading = "Storage"
+    )]
+    mysql_min_connections: u32,
+
+    #[arg(
+        long,
+        help = "MySQL: idle connection timeout (seconds)",
+        help_heading = "Storage"
+    )]
+    mysql_idle_timeout: Option<u64>,
+
+    // ── Multi-replica ─────────────────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value_t = 3,
+        env = "NYRO_CONFIG_POLL_INTERVAL",
+        help = "Seconds between config epoch polls for multi-replica cache sync (0 = disabled)",
+        help_heading = "Multi-replica"
+    )]
+    config_poll_interval: u64,
+
+    #[arg(
+        long,
+        env = "NYRO_WEBUI_DIR",
+        help = "Serve WebUI from this directory instead of the embedded assets (optional)",
+        help_heading = "Multi-replica"
+    )]
+    webui_dir: Option<PathBuf>,
 
     // ── Standalone ────────────────────────────────────────────────────────────
     #[arg(
@@ -196,17 +233,17 @@ async fn run_standalone(config_path: &str, args: &Args) -> anyhow::Result<()> {
     let proxy_port = yaml.server.proxy_port;
 
     let providers = yaml_config::build_providers(&yaml);
-    let routes = yaml_config::build_routes(&yaml, &providers);
+    let models = yaml_config::build_models(&yaml, &providers);
     let settings: Vec<(String, String)> = yaml.settings.into_iter().collect();
 
     tracing::info!(
-        "loaded {} providers, {} routes from YAML",
+        "loaded {} providers, {} models from YAML",
         providers.len(),
-        routes.len()
+        models.len()
     );
 
     let storage: nyro_core::storage::DynStorage =
-        Arc::new(MemoryStorage::new(providers, routes, settings));
+        Arc::new(MemoryStorage::new(providers, models, settings));
 
     let data_dir = shellexpand::tilde(&args.data_dir).to_string();
     let proxy_cors_origins = if args.proxy_cors_origins.is_empty() {
@@ -234,7 +271,7 @@ async fn run_standalone(config_path: &str, args: &Args) -> anyhow::Result<()> {
     tracing::info!("proxy  → http://{}:{}", proxy_host, proxy_port);
     tracing::info!("standalone mode: admin API and WebUI are disabled");
 
-    gateway.start_proxy().await?;
+    gateway.start_proxy_with_shutdown(shutdown_signal()).await?;
     Ok(())
 }
 
@@ -265,6 +302,7 @@ async fn run_full(args: &Args) -> anyhow::Result<()> {
         proxy_cors_origins,
         data_dir: PathBuf::from(data_dir),
         storage: build_storage_config(args)?,
+        config_poll_interval: Duration::from_secs(args.config_poll_interval),
         ..Default::default()
     };
 
@@ -272,9 +310,15 @@ async fn run_full(args: &Args) -> anyhow::Result<()> {
 
     let gw_proxy = gateway.clone();
     let storage_for_logs = gateway.storage.clone();
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let proxy_shutdown = shutdown_tx.subscribe();
+    let admin_shutdown_tx = shutdown_tx.clone();
 
-    tokio::spawn(async move {
-        if let Err(e) = gw_proxy.start_proxy().await {
+    let proxy_task = tokio::spawn(async move {
+        if let Err(e) = gw_proxy
+            .start_proxy_with_shutdown(wait_for_shutdown(proxy_shutdown))
+            .await
+        {
             tracing::error!("proxy server error: {e}");
         }
     });
@@ -285,9 +329,17 @@ async fn run_full(args: &Args) -> anyhow::Result<()> {
 
     let admin_router = admin_routes::create_router(gateway, admin_token.clone());
 
-    let app = admin_router
-        .fallback(serve_webui)
-        .layer(build_cors_layer(&admin_cors_origins));
+    let app = if let Some(ref webui_dir) = args.webui_dir {
+        let index = webui_dir.join("index.html");
+        tracing::info!("webui  serving from directory: {}", webui_dir.display());
+        admin_router
+            .fallback_service(ServeDir::new(webui_dir).not_found_service(ServeFile::new(index)))
+            .layer(build_cors_layer(&admin_cors_origins))
+    } else {
+        admin_router
+            .fallback(serve_webui)
+            .layer(build_cors_layer(&admin_cors_origins))
+    };
 
     let admin_addr = format!("{}:{}", args.admin_host, args.admin_port);
     let listener = tokio::net::TcpListener::bind(&admin_addr).await?;
@@ -299,8 +351,52 @@ async fn run_full(args: &Args) -> anyhow::Result<()> {
     if admin_token.is_none() {
         tracing::warn!("admin API auth disabled: set --admin-token for production");
     }
-    axum::serve(listener, app).await?;
+    let admin_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = admin_shutdown_tx.send(());
+        })
+        .await;
+
+    let _ = shutdown_tx.send(());
+    if let Err(error) = proxy_task.await {
+        tracing::error!("proxy server task failed: {error}");
+    }
+
+    admin_result?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!("failed to listen for shutdown signal: {error}");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::warn!("failed to listen for SIGTERM: {error}"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("shutdown signal received");
+}
+
+async fn wait_for_shutdown(mut shutdown: broadcast::Receiver<()>) {
+    let _ = shutdown.recv().await;
 }
 
 // ── WebUI (embedded) ──────────────────────────────────────────────────────────
@@ -381,13 +477,35 @@ fn build_storage_config(args: &Args) -> anyhow::Result<GatewayStorageConfig> {
         None
     };
 
-    let sql = SqlStorageConfig {
+    let postgres = SqlStorageConfig {
         url: postgres_url,
         max_connections: args.postgres_max_connections,
         min_connections: args.postgres_min_connections,
-        acquire_timeout: Duration::from_secs(args.postgres_acquire_timeout),
         idle_timeout: args.postgres_idle_timeout.map(Duration::from_secs),
-        max_lifetime: args.postgres_max_lifetime.map(Duration::from_secs),
+    };
+
+    let mysql_url = if matches!(backend, StorageBackendKind::Mysql) {
+        let dsn = args
+            .mysql_dsn
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--mysql-dsn (or env NYRO_MYSQL_DSN) is required \
+                     when --storage-backend=mysql"
+                )
+            })?;
+        Some(dsn.to_string())
+    } else {
+        None
+    };
+
+    let mysql = SqlStorageConfig {
+        url: mysql_url,
+        max_connections: args.mysql_max_connections,
+        min_connections: args.mysql_min_connections,
+        idle_timeout: args.mysql_idle_timeout.map(Duration::from_secs),
     };
 
     Ok(GatewayStorageConfig {
@@ -395,7 +513,8 @@ fn build_storage_config(args: &Args) -> anyhow::Result<GatewayStorageConfig> {
         sqlite: SqliteStorageConfig {
             migrate_on_start: args.migrate_on_start,
         },
-        postgres: sql,
+        postgres,
+        mysql,
     })
 }
 
@@ -403,6 +522,7 @@ fn parse_storage_backend(value: &str) -> anyhow::Result<StorageBackendKind> {
     match value.trim().to_ascii_lowercase().as_str() {
         "sqlite" => Ok(StorageBackendKind::Sqlite),
         "postgres" => Ok(StorageBackendKind::Postgres),
+        "mysql" => Ok(StorageBackendKind::Mysql),
         other => anyhow::bail!("unsupported storage backend: {other}"),
     }
 }
