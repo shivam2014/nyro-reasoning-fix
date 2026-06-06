@@ -464,7 +464,14 @@ fn encode_message(msg: &Message) -> Result<Value> {
             let parts: Vec<Value> = blocks
                 .iter()
                 .filter(|b| {
-                    !(filter_thinking
+                    // ToolUse and ToolResult are encoded via the top-level
+                    // tool_calls / tool_call_id fields, not inside content.
+                    // Emitting them here would produce {"type":"function"} items
+                    // in the content array, which OpenAI validators reject.
+                    !matches!(
+                        b,
+                        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                    ) && !(filter_thinking
                         && matches!(
                             b,
                             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }

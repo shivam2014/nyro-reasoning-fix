@@ -249,6 +249,30 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<Message>> {
     let role = match msg.role.as_str() {
         "user" => Role::User,
         "assistant" => Role::Assistant,
+        // Some clients (e.g. Claude Code) may include system-role messages
+        // in the messages array rather than in the top-level "system" field.
+        // Accept and decode them as system messages.
+        "system" => {
+            // Extract text from AnthropicContent (Text or Blocks)
+            let text = match &msg.content {
+                AnthropicContent::Text(t) => t.clone(),
+                AnthropicContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            return Ok(vec![Message {
+                role: Role::System,
+                content: MessageContent::Text(text),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }]);
+        }
         other => anyhow::bail!("unknown Anthropic role: {other}"),
     };
 
