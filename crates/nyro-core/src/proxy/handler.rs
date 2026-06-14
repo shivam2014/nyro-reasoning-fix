@@ -88,6 +88,16 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
                     if let Some(max_out) = caps.output_max_tokens {
                         obj["max_output_tokens"] = serde_json::json!(max_out);
                     }
+                    obj["reasoning"] = serde_json::json!(caps.reasoning);
+                    obj["tool_call"] = serde_json::json!(caps.tool_call);
+                    obj["input_modalities"] = serde_json::json!(caps.input_modalities);
+                    obj["output_modalities"] = serde_json::json!(caps.output_modalities);
+                    if let Some(cost) = caps.input_cost {
+                        obj["input_cost"] = serde_json::json!(cost);
+                    }
+                    if let Some(cost) = caps.output_cost {
+                        obj["output_cost"] = serde_json::json!(cost);
+                    }
                 }
             }
 

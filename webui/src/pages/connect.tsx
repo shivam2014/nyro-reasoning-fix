@@ -674,6 +674,7 @@ export default function ConnectPage() {
         routes: cliRoutes.map((r) => ({
           name: r.name,
           is_enabled: r.is_enabled,
+          virtual_model: r.name,
           target_provider: r.target_provider,
           target_model: r.target_model,
         })),
