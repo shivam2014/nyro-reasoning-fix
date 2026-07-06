@@ -277,6 +277,9 @@ pub async fn dispatch_pipeline(
             disable_default_auth: provider_runtime.binding.disable_default_auth,
         };
 
+        // Populate model capabilities for safety clamping (e.g. max_tokens).
+        request_for_target.model_capabilities = gw.admin().get_model_capabilities(&target.provider_id, &actual_model).await.ok();
+
         // Build outbound request — PassThrough (Native + no mutations) or full 7-step pipeline.
         let passthrough_req =
             plan.mode == ProtocolMode::Native && !adapter.declared_request_mutations();

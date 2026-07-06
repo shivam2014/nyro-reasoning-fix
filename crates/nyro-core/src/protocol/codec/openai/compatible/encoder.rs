@@ -37,7 +37,16 @@ impl RequestEncoder for OpenAIEncoder {
             obj.insert("temperature".into(), t.into());
         }
         if let Some(m) = req.generation.max_tokens {
-            obj.insert("max_tokens".into(), m.into());
+            let clamped = if let Some(caps) = &req.model_capabilities {
+                if let Some(limit) = caps.output_max_tokens {
+                    m.min(limit as u32)
+                } else {
+                    m
+                }
+            } else {
+                m
+            };
+            obj.insert("max_tokens".into(), clamped.into());
         }
         if let Some(p) = req.generation.top_p {
             obj.insert("top_p".into(), p.into());

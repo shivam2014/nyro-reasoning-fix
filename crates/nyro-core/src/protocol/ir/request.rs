@@ -460,6 +460,9 @@ pub struct AiRequest {
     /// [IR] Google SafetySettings (ignored by other encoders).
     pub safety_settings: Option<Vec<SafetySettings>>,
 
+    /// [IR] Model capabilities fetched from the admin store (used for safety clamping).
+    pub model_capabilities: Option<crate::db::models::ModelCapabilities>,
+
     // ── Protocol extensions ───────────────────────────────────────────────────
     /// Protocol-domain Ext carrying fields specific to the source protocol.
     /// Populated by the ingress decoder (PR-2); consumed by the egress encoder (PR-3).
@@ -485,6 +488,7 @@ impl AiRequest {
             reasoning: ReasoningConfig::default(),
             response_format: None,
             safety_settings: None,
+            model_capabilities: None,
             ext: None,
             meta: RequestMetadata::default(),
         }
