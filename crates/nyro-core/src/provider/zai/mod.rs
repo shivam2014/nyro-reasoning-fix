@@ -103,8 +103,20 @@ impl Vendor for ZaiVendor {
         use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
         &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
     }
+    async fn post_encode(
+        &self,
+        _ctx: &VendorCtx<'_>,
+        body: &mut Value,
+        _headers: &mut HeaderMap,
+    ) -> anyhow::Result<()> {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("prompt_cache_retention");
+        }
+        Ok(())
+    }
+
     fn declared_request_mutations(&self) -> bool {
-        false
+        true
     }
     fn declared_response_mutations(&self) -> bool {
         false
