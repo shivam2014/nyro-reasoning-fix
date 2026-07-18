@@ -143,6 +143,17 @@ func (g *Gateway) Dispatch(w http.ResponseWriter, r *http.Request, req *ir.AiReq
 			writeJSONError(rec, http.StatusInternalServerError, "encode request: "+err.Error())
 			return
 		}
+		// Strip prompt_cache_retention for non-OpenAI vendors — only OpenAI
+		// supports this field; forwarding it to other vendors causes errors.
+		if p.Provider != "openai" {
+			var body map[string]json.RawMessage
+			if json.Unmarshal(outbound.Body, &body) == nil {
+				delete(body, "prompt_cache_retention")
+				if stripped, mErr := json.Marshal(body); mErr == nil {
+					outbound.Body = stripped
+				}
+			}
+		}
 		plugin.RunPhaseHooks(plugin.PhaseOnUpstream, &plugin.PhaseContext{Ctx: r.Context(), Request: req, Bag: bag})
 
 		auth, authErr := provider.AuthenticatorFor(p.Provider, p.Protocol, runtimeFromUpstream(*p))
