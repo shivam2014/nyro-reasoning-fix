@@ -31,6 +31,9 @@ type AiRequest struct {
 
 	// ── Metadata / vendor bag ──
 	Meta RequestMetadata
+
+	// ── Model capabilities (threaded from dispatcher to encoder) ──
+	ModelCapabilities *ModelCapabilities
 }
 
 // NewAiRequest constructs an AiRequest with the minimal required fields.

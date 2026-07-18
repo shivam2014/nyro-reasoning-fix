@@ -22,6 +22,14 @@ func (requestEncoder) Encode(req *ir.AiRequest) (codec.OutboundRequest, error) {
 	}
 
 	w.MaxTokens = req.Generation.MaxTokens
+	// Clamp max_tokens to the model's output_max_tokens limit (Rust commit 0294065).
+	// Prevents upstream 400s when clients send max_tokens exceeding the model's limit.
+	if w.MaxTokens != nil && req.ModelCapabilities != nil && req.ModelCapabilities.OutputMaxTokens != nil {
+		limit := uint32(*req.ModelCapabilities.OutputMaxTokens) // u64→u32, matches Rust `as u32`
+		if *w.MaxTokens > limit {
+			*w.MaxTokens = limit
+		}
+	}
 	w.Temperature = req.Generation.Temperature
 	w.TopP = req.Generation.TopP
 	w.Seed = req.Generation.Seed

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nyroway/nyro/go/internal/capabilities"
 	"github.com/nyroway/nyro/go/internal/observability"
 	"github.com/nyroway/nyro/go/internal/plugin"
 	"github.com/nyroway/nyro/go/internal/protocol/codec"
@@ -119,6 +120,12 @@ func (g *Gateway) Dispatch(w http.ResponseWriter, r *http.Request, req *ir.AiReq
 			actualModel = clientModel
 		}
 		req.Model = actualModel
+
+		// Thread model capabilities from the static catalog (Rust commit 0294065).
+		// Used by encoders to clamp max_tokens to the model's output limit.
+		if caps := capabilities.Lookup(p.Provider, actualModel); caps != nil {
+			req.ModelCapabilities = caps
+		}
 
 		// resolve egress codec: if the provider speaks a different protocol
 		// than the client, encode upstream requests with the egress codec and
