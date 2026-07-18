@@ -135,6 +135,10 @@ fn should_forward_client_header(name: &str) -> bool {
             | "via"
             | "origin"
             | "referer"
+            // Pi/agent custom session headers — Console Go returns 500 when
+            // forwarded. Not a standard HTTP header; strip at the router level.
+            | "session_id"
+            | "x-session-affinity"
     ) || name.ends_with("-api-key")
         || name.starts_with("sec-")
         || name.starts_with("proxy-")
