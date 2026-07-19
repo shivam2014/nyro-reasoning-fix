@@ -715,7 +715,7 @@ async fn probe_tool_support(
     model: &str,
 ) -> Option<bool> {
     let base_url = provider.base_url.trim_end_matches('/');
-    let url = format!("{base_url}/v1/chat/completions");
+    let url = format!("{base_url}/chat/completions");
 
     let probe_body = serde_json::json!({
         "model": model,
