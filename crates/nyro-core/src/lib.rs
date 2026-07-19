@@ -37,6 +37,12 @@ pub struct CapabilityCacheEntry {
     pub cached_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+pub struct ToolProbeEntry {
+    pub supports_tool: bool,
+    pub cached_at: Instant,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeStorageKind {
     Memory,
@@ -55,6 +61,7 @@ pub struct Gateway {
     pub model_cache: Arc<tokio::sync::RwLock<router::ModelCache>>,
     pub health_registry: Arc<HealthRegistry>,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
+    pub tool_probe_cache: Arc<tokio::sync::RwLock<HashMap<String, ToolProbeEntry>>>,
     pub log_tx: mpsc::Sender<LogEntry>,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     #[allow(dead_code)]
@@ -174,6 +181,7 @@ impl Gateway {
         ));
         let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let tool_probe_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
         let (log_tx, log_rx) = mpsc::channel(1024);
 
@@ -186,6 +194,7 @@ impl Gateway {
             model_cache,
             health_registry,
             ollama_capability_cache,
+            tool_probe_cache,
             log_tx,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sqlite_pool,
@@ -391,6 +400,40 @@ impl Gateway {
         let prefix = format!("{provider_id}:");
         let mut cache = self.ollama_capability_cache.write().await;
         cache.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    pub async fn get_tool_probe_cached(
+        &self,
+        provider_id: &str,
+        model: &str,
+        ttl: Duration,
+    ) -> Option<bool> {
+        let key = format!("{provider_id}:{model}");
+        let cache = self.tool_probe_cache.read().await;
+        cache.get(&key).and_then(|entry| {
+            if entry.cached_at.elapsed() < ttl {
+                Some(entry.supports_tool)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub async fn set_tool_probe_cache(
+        &self,
+        provider_id: &str,
+        model: &str,
+        supports_tool: bool,
+    ) {
+        let key = format!("{provider_id}:{model}");
+        let mut cache = self.tool_probe_cache.write().await;
+        cache.insert(
+            key,
+            ToolProbeEntry {
+                supports_tool,
+                cached_at: Instant::now(),
+            },
+        );
     }
 }
 

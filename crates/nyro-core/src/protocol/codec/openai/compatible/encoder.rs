@@ -17,7 +17,39 @@ impl RequestEncoder for OpenAIEncoder {
         let tools = req.tools.as_deref().unwrap_or(&[]);
         let tools_opt: Option<&[ToolSpec]> = if tools.is_empty() { None } else { Some(tools) };
 
-        let normalized_messages = normalize_messages_for_openai(&req.messages, tools_opt);
+        // Convert Role::Tool → Role::User if upstream doesn't support tool calling
+        let suppress_tool_calling = req
+            .model_capabilities
+            .as_ref()
+            .map(|caps| !caps.tool_call)
+            .unwrap_or(false);
+
+        let messages = if suppress_tool_calling {
+            req.messages
+                .iter()
+                .map(|msg| {
+                    if msg.role == Role::Tool {
+                        Message {
+                            role: Role::User,
+                            content: MessageContent::Text(format!(
+                                "[Tool result ({}): {}]",
+                                msg.tool_call_id.as_deref().unwrap_or("unknown"),
+                                msg.content.to_text()
+                            )),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            meta: msg.meta.clone(),
+                        }
+                    } else {
+                        msg.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            req.messages.clone()
+        };
+
+        let normalized_messages = normalize_messages_for_openai(&messages, tools_opt);
         let messages: Vec<Value> = normalized_messages
             .iter()
             .map(encode_message)
@@ -52,7 +84,8 @@ impl RequestEncoder for OpenAIEncoder {
             obj.insert("top_p".into(), p.into());
         }
 
-        if !tools.is_empty() {
+        // Only include tools/tool_choice if the upstream supports tool calling
+        if !suppress_tool_calling && !tools.is_empty() {
             let tools_val: Vec<Value> = tools
                 .iter()
                 .map(|t| {
@@ -73,8 +106,10 @@ impl RequestEncoder for OpenAIEncoder {
                 .collect();
             obj.insert("tools".into(), Value::Array(tools_val));
         }
-        if let Some(ref tc) = req.tool_choice {
-            obj.insert("tool_choice".into(), tool_choice_to_value(tc));
+        if !suppress_tool_calling {
+            if let Some(ref tc) = req.tool_choice {
+                obj.insert("tool_choice".into(), tool_choice_to_value(tc));
+            }
         }
 
         // Always include_usage when streaming.

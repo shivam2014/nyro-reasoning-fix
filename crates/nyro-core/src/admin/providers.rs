@@ -577,38 +577,58 @@ impl AdminService {
         provider: &Provider,
         model: &str,
     ) -> anyhow::Result<ModelCapabilities> {
-        match preset_capabilities_source(provider) {
+        let mut caps = match preset_capabilities_source(provider) {
             CapabilitiesSource::ModelsDev(vendor_key) => {
                 let matched =
                     lookup_models_dev_capability(&self.gw.config.data_dir, vendor_key, model);
                 matched.ok_or_else(|| {
                     anyhow::anyhow!("no matched model capabilities found in models.dev")
-                })
+                })?
             }
             CapabilitiesSource::Http(url) => {
                 if is_ollama_show_endpoint(url) {
-                    self.query_ollama_show_capability(url, model).await
+                    self.query_ollama_show_capability(url, model).await?
                 } else {
-                    self.query_http_capability(provider, url, model).await
+                    self.query_http_capability(provider, url, model).await?
                 }
             }
             CapabilitiesSource::Auto => {
                 // First try models.dev fuzzy match
                 if let Some(caps) = fuzzy_match_models_dev(&self.gw.config.data_dir, model) {
-                    return Ok(caps);
-                }
-                // Fall back to querying the provider's own models endpoint
-                if let Some(url) = resolve_models_endpoint(provider) {
+                    caps
+                } else if let Some(url) = resolve_models_endpoint(provider) {
                     if is_ollama_show_endpoint(&url) {
-                        self.query_ollama_show_capability(&url, model).await
+                        self.query_ollama_show_capability(&url, model).await?
                     } else {
-                        self.query_http_capability(provider, &url, model).await
+                        self.query_http_capability(provider, &url, model).await?
                     }
                 } else {
                     anyhow::bail!("no matched model capabilities found in auto mode")
                 }
             }
+        };
+
+        // Run tool support probe for Auto providers to verify/override tool_call.
+        // Some proxies (Console Go) advertise tool_call=true but reject role:tool at runtime.
+        if caps.tool_call && matches!(preset_capabilities_source(provider), CapabilitiesSource::Auto) {
+            let provider_id = provider.id.as_str();
+            if let Some(cached) = self
+                .gw
+                .get_tool_probe_cached(provider_id, model, Duration::from_secs(3600))
+                .await
+            {
+                caps.tool_call = cached;
+            } else if let Some(probe_result) =
+                probe_tool_support(&self.gw.http_client, provider, model).await
+            {
+                caps.tool_call = probe_result;
+                self.gw
+                    .set_tool_probe_cache(provider_id, model, probe_result)
+                    .await;
+            }
         }
+
+        Ok(caps)
     }
 
     async fn query_http_capability(
@@ -679,4 +699,65 @@ impl AdminService {
         let json: Value = resp.json().await.unwrap_or_default();
         Ok(parse_ollama_capability(&json, model))
     }
+}
+
+/// Probe whether an upstream model actually supports tool calling by sending a
+/// minimal request with a `tools` parameter.
+///
+/// Returns:
+/// - `Some(true)` — model returned `tool_calls` in response
+/// - `Some(false)` — model returned HTTP 400 (tool not supported)
+/// - `None` — transient error, caller should retry later
+async fn probe_tool_support(
+    http_client: &reqwest::Client,
+    provider: &Provider,
+    model: &str,
+) -> Option<bool> {
+    let base_url = provider.base_url.trim_end_matches('/');
+    let url = format!("{base_url}/v1/chat/completions");
+
+    let probe_body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "ping",
+                "description": "Tool support detection probe",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }],
+        "tool_choice": "auto",
+        "max_tokens": 1,
+    });
+
+    let credential = provider.api_key.trim();
+    let resp = http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {credential}"))
+        .json(&probe_body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+
+    // 400 likely means "tools not supported" — cache as false
+    if resp.status().as_u16() == 400 {
+        return Some(false);
+    }
+
+    if !resp.status().is_success() {
+        return None; // transient error, don't cache
+    }
+
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let has_tool_calls = body["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+
+    Some(has_tool_calls)
 }
