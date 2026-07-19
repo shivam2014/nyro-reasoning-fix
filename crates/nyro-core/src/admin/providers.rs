@@ -702,11 +702,12 @@ impl AdminService {
 }
 
 /// Probe whether an upstream model actually supports tool calling by sending a
-/// minimal request with a `tools` parameter.
+/// Probe whether an upstream model accepts `role: tool` messages by sending a
+/// minimal conversation containing a tool result.
 ///
 /// Returns:
-/// - `Some(true)` — model returned `tool_calls` in response
-/// - `Some(false)` — model returned HTTP 400 (tool not supported)
+/// - `Some(true)` — upstream returned 200 (role:tool accepted)
+/// - `Some(false)` — upstream returned 400 (role:tool rejected)
 /// - `None` — transient error, caller should retry later
 async fn probe_tool_support(
     http_client: &reqwest::Client,
@@ -718,19 +719,10 @@ async fn probe_tool_support(
 
     let probe_body = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "tools": [{
-            "type": "function",
-            "function": {
-                "name": "ping",
-                "description": "Tool support detection probe",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
-        }],
-        "tool_choice": "auto",
+        "messages": [
+            {"role": "user", "content": "ping"},
+            {"role": "tool", "tool_call_id": "probe_1", "content": "pong"}
+        ],
         "max_tokens": 1,
     });
 
@@ -744,20 +736,14 @@ async fn probe_tool_support(
         .await
         .ok()?;
 
-    // 400 likely means "tools not supported" — cache as false
     if resp.status().as_u16() == 400 {
         return Some(false);
     }
 
     if !resp.status().is_success() {
-        return None; // transient error, don't cache
+        return None;
     }
 
-    let body: serde_json::Value = resp.json().await.ok()?;
-    let has_tool_calls = body["choices"][0]["message"]["tool_calls"]
-        .as_array()
-        .map(|c| !c.is_empty())
-        .unwrap_or(false);
-
-    Some(has_tool_calls)
+    // 200 = role:tool accepted
+    Some(true)
 }
