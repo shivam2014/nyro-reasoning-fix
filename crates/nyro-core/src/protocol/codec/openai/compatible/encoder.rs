@@ -251,6 +251,21 @@ fn normalize_messages_for_openai(messages: &[Message], tools: Option<&[ToolSpec]
 
     out = prune_orphan_assistant_tool_calls(out);
 
+    // Flatten single-text Blocks to plain string.
+    // Responses API decoder produces array content (e.g. [{"type":"text","text":"..."}])
+    // that some upstreams (DeepSeek via Opencode GO) reject with 400.
+    for msg in &mut out {
+        if msg.role != Role::Tool {
+            if let MessageContent::Blocks(blocks) = &msg.content {
+                if blocks.len() == 1 {
+                    if let ContentBlock::Text { text, .. } = &blocks[0] {
+                        msg.content = MessageContent::Text(text.clone());
+                    }
+                }
+            }
+        }
+    }
+
     out.retain(|msg| {
         if msg.role != Role::Assistant {
             return true;
