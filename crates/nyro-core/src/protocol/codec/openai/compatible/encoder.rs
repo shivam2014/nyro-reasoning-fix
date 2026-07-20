@@ -91,7 +91,7 @@ impl RequestEncoder for OpenAIEncoder {
                 .map(|t| {
                     let mut f = serde_json::json!({
                         "name": t.name,
-                        "parameters": t.parameters,
+                        "parameters": t.normalized_parameters(),
                     });
                     if let Some(ref desc) = t.description {
                         f.as_object_mut()

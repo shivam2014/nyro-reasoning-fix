@@ -96,7 +96,7 @@ impl RequestEncoder for AnthropicEncoder {
                         serde_json::json!({
                             "name": t.name,
                             "description": t.description,
-                            "input_schema": t.parameters,
+                            "input_schema": t.normalized_parameters(),
                         })
                     }
                 })

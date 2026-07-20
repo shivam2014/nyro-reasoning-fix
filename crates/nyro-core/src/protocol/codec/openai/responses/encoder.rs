@@ -124,7 +124,7 @@ impl RequestEncoder for ResponsesEncoder {
                             "type": "function",
                             "name": t.name,
                             "description": t.description,
-                            "parameters": t.parameters,
+                            "parameters": t.normalized_parameters(),
                         })
                     }
                 })

@@ -92,7 +92,7 @@ impl RequestEncoder for GoogleEncoder {
                         if let Some(ref desc) = t.description {
                             d.insert("description".into(), Value::String(desc.clone()));
                         }
-                        d.insert("parameters".into(), sanitize_gemini_schema(&t.parameters));
+                        d.insert("parameters".into(), sanitize_gemini_schema(&t.normalized_parameters()));
                         fn_decls.push(decl);
                     }
                 }

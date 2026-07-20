@@ -294,6 +294,22 @@ pub struct ToolSpec {
     pub meta: Option<Value>,
 }
 
+impl ToolSpec {
+    /// Return a normalized parameters value — ensures minimum valid JSON Schema.
+    /// Empty or type-less objects get {"type": "object"} so upstream providers
+    /// that require at least a type field don't reject the request.
+    pub fn normalized_parameters(&self) -> serde_json::Value {
+        if self.parameters.is_null()
+            || (self.parameters.is_object()
+                && self.parameters.as_object().map_or(true, |o| o.is_empty()))
+        {
+            serde_json::json!({"type": "object"})
+        } else {
+            self.parameters.clone()
+        }
+    }
+}
+
 /// `tool_choice` — how the model selects tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -501,5 +517,79 @@ impl AiRequest {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_null_parameters_normalizes_to_type_object() {
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: None,
+            parameters: Value::Null,
+            strict: None,
+            cache_control: None,
+            meta: None,
+        };
+        assert_eq!(spec.normalized_parameters(), json!({"type": "object"}));
+    }
+
+    #[test]
+    fn test_empty_object_parameters_normalizes_to_type_object() {
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: None,
+            parameters: json!({}),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        };
+        assert_eq!(spec.normalized_parameters(), json!({"type": "object"}));
+    }
+
+    #[test]
+    fn test_valid_type_object_passes_through() {
+        let params = json!({"type": "object"});
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: None,
+            parameters: params.clone(),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        };
+        assert_eq!(spec.normalized_parameters(), params);
+    }
+
+    #[test]
+    fn test_complex_schema_passes_through() {
+        let params = json!({"type": "object", "properties": {"x": {"type": "string"}}});
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: None,
+            parameters: params.clone(),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        };
+        assert_eq!(spec.normalized_parameters(), params);
+    }
+
+    #[test]
+    fn test_type_less_schema_passes_through() {
+        let params = json!({"properties": {"x": {"type": "string"}}});
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: None,
+            parameters: params.clone(),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        };
+        assert_eq!(spec.normalized_parameters(), params);
     }
 }
