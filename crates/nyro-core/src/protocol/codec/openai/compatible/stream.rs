@@ -230,6 +230,18 @@ impl OpenAIStreamParser {
             let u = extract_usage(chunk);
             if u.prompt_tokens > 0 || u.completion_tokens > 0 {
                 deltas.push(AiStreamDelta::Usage(u));
+                // OpenAI `stream_options.include_usage` delivers usage in a
+                // final chunk with empty `choices` and no finish_reason, and
+                // some providers omit [DONE] too. Treat such a trailing
+                // usage chunk as completion so the formatter emits a
+                // terminal finish_reason chunk + [DONE] instead of leaving
+                // the client hanging on "Stream ended without finish_reason".
+                if !self.done {
+                    self.done = true;
+                    deltas.push(AiStreamDelta::Done {
+                        stop_reason: "stop".to_string(),
+                    });
+                }
             }
             return;
         };
@@ -939,6 +951,44 @@ mod tests {
             })
             .unwrap();
         assert_eq!(done, "stop", "Done stop_reason must be 'stop'");
+    }
+
+    #[test]
+    fn test_stream_usage_only_trailing_chunk_marks_done() {
+        // Providers using stream_options.include_usage send the usage in a
+        // final chunk with empty `choices` and may omit [DONE] and any
+        // finish_reason. The parser must treat such a trailing usage chunk
+        // as completion so the formatter can emit a terminal finish_reason
+        // chunk + [DONE]. Reproduces the live bug where the client saw
+        // "Stream ended without finish_reason".
+        let chunks = [
+            data_sse(r#"{"id":"gen-1","model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"content":"Hi 👋"},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"gen-1","model":"gpt-5.6-luna","choices":[]}"#),
+            data_sse(r#"{"id":"gen-1","model":"gpt-5.6-luna","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}"#),
+        ]
+        .concat();
+
+        let mut parser = OpenAIStreamParser::new();
+        let mut deltas = parser.parse_chunk(&chunks).unwrap();
+        deltas.extend(parser.finish().unwrap());
+
+        let done_count = deltas
+            .iter()
+            .filter(|d| matches!(d, AiStreamDelta::Done { .. }))
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "usage-only trailing chunk must produce exactly 1 Done, got {done_count}: {deltas:?}"
+        );
+
+        let usage = deltas.iter().find_map(|d| {
+            if let AiStreamDelta::Usage(u) = d {
+                Some((u.prompt_tokens, u.completion_tokens))
+            } else {
+                None
+            }
+        });
+        assert_eq!(usage, Some((8, 6)), "usage must be captured, got: {deltas:?}");
     }
 
     #[test]

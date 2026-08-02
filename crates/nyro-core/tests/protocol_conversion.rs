@@ -193,6 +193,50 @@ fn openai_stream_formatter_sets_tool_calls_finish_reason_when_tool_calls_seen() 
 }
 
 #[test]
+fn openai_stream_usage_only_trailing_chunk_emits_finish_reason() {
+    // Live-bug reproduction: upstream stream ends with a usage-only chunk
+    // (`choices: []` + `usage`) and NO [DONE] / finish_reason. The client
+    // (pi) must still receive a terminal finish_reason chunk + [DONE];
+    // otherwise it throws "Stream ended without finish_reason".
+    let upstream = [
+        "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.6-luna\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi 👋\"},\"finish_reason\":null}]}",
+        "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.6-luna\",\"choices\":[]}",
+        "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.6-luna\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":6,\"total_tokens\":14}}",
+    ]
+    .map(|s| format!("{s}\n\n"))
+    .concat();
+
+    let mut parser =
+        nyro_core::protocol::codec::openai::compatible::stream::OpenAIStreamParser::new();
+    let mut deltas = parser.parse_chunk(&upstream).unwrap();
+    deltas.extend(parser.finish().unwrap());
+
+    let mut fmt = OpenAIStreamFormatter::new();
+    let events = fmt.format_deltas(&deltas);
+    let data: Vec<String> = events.iter().map(|e| e.data.clone()).collect();
+
+    assert!(
+        data.iter().any(|d| d == "[DONE]"),
+        "expected [DONE] terminator, got: {data:?}"
+    );
+    let last_json = events
+        .iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .last()
+        .expect("stream must end with a JSON chunk");
+    let finish_reason = last_json
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        finish_reason, Some("stop"),
+        "terminal chunk must carry finish_reason, got: {data:?}"
+    );
+}
+
+#[test]
 fn gemini_tool_result_correlation_success() {
     let messages = vec![
         Message {
