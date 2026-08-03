@@ -227,6 +227,10 @@ impl OpenAIStreamParser {
             .and_then(|v| v.as_array())
             .and_then(|a| a.first())
         else {
+            // Chunks with an empty/absent choices array — e.g. opencode.ai's
+            // malformed {"choices":[],"cost":"0"} stream footer — carry no
+            // content and no usage, so they produce no deltas. Dropping them
+            // here means the IR path never forwards them raw to clients.
             let u = extract_usage(chunk);
             if u.prompt_tokens > 0 || u.completion_tokens > 0 {
                 deltas.push(AiStreamDelta::Usage(u));
@@ -366,6 +370,7 @@ pub struct OpenAIStreamFormatter {
     id: String,
     model: String,
     saw_tool_call: bool,
+    done_emitted: bool,
 }
 
 impl Default for OpenAIStreamFormatter {
@@ -381,6 +386,7 @@ impl OpenAIStreamFormatter {
             id: format!("chatcmpl-{}", Uuid::new_v4()),
             model: String::new(),
             saw_tool_call: false,
+            done_emitted: false,
         }
     }
 }
@@ -448,6 +454,7 @@ impl StreamResponseEncoder for OpenAIStreamFormatter {
                     self.usage = u.clone();
                 }
                 AiStreamDelta::Done { stop_reason } => {
+                    self.done_emitted = true;
                     let final_reason = if self.saw_tool_call {
                         "tool_calls".to_string()
                     } else {
@@ -474,7 +481,36 @@ impl StreamResponseEncoder for OpenAIStreamFormatter {
     }
 
     fn format_done(&mut self) -> Vec<SseEvent> {
-        vec![]
+        // Some upstreams never emit a finish_reason nor [DONE] (opencode.ai
+        // streams end with a usage-only chunk followed by a malformed
+        // {"choices":[],"cost":"0"} footer). Without this, the client hits EOF
+        // with no terminal event and reports "Stream ended without finish_reason".
+        // Emit a synthetic terminal chunk + [DONE] unless a Done delta already
+        // produced one (guard against double-emission).
+        if self.done_emitted {
+            return vec![];
+        }
+        self.done_emitted = true;
+        let final_reason = if self.saw_tool_call {
+            "tool_calls".to_string()
+        } else {
+            "stop".to_string()
+        };
+        let chunk = serde_json::json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "model": self.model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": final_reason}],
+            "usage": {
+                "prompt_tokens": self.usage.prompt_tokens,
+                "completion_tokens": self.usage.completion_tokens,
+                "total_tokens": self.usage.prompt_tokens + self.usage.completion_tokens,
+            }
+        });
+        vec![
+            SseEvent::new(None, chunk.to_string()),
+            SseEvent::new(None, "[DONE]"),
+        ]
     }
 
     fn usage(&self) -> Usage {
@@ -961,6 +997,75 @@ mod tests {
         assert_eq!(
             done_count, 1,
             "expected exactly 1 Done (finish_reason + [DONE] deduped), got {done_count}: {deltas:?}"
+        );
+    }
+
+    // ── BUG 2: terminal event when upstream never emits finish_reason ──
+
+    #[test]
+    fn test_format_done_emits_terminal_when_no_done_delta() {
+        // Upstream (opencode.ai) ends the stream without finish_reason/[DONE].
+        // format_done must synthesize a finish_reason chunk + [DONE] so clients
+        // don't see "Stream ended without finish_reason".
+        let mut formatter = OpenAIStreamFormatter::new();
+        formatter.format_deltas(&[AiStreamDelta::MessageStart {
+            id: "chatcmpl-x".to_string(),
+            model: "gpt-5.6-luna-2".to_string(),
+        }]);
+        let events = formatter.format_done();
+        assert_eq!(
+            events.len(),
+            2,
+            "expected finish_reason chunk + [DONE], got: {events:?}"
+        );
+        let chunk: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            chunk["choices"][0]["delta"],
+            serde_json::json!({}),
+            "terminal chunk delta must be empty"
+        );
+        assert_eq!(events[1].data, "[DONE]");
+    }
+
+    #[test]
+    fn test_format_done_no_double_emission_after_done_delta() {
+        // When upstream already produced a Done (finish_reason + [DONE]),
+        // format_done must NOT emit a second terminal event.
+        let mut formatter = OpenAIStreamFormatter::new();
+        let events = formatter.format_deltas(&[
+            AiStreamDelta::MessageStart {
+                id: "chatcmpl-x".to_string(),
+                model: "gpt-4o".to_string(),
+            },
+            AiStreamDelta::Done {
+                stop_reason: "stop".to_string(),
+            },
+        ]);
+        assert!(
+            events.iter().any(|e| e.data == "[DONE]"),
+            "Done delta must emit [DONE]: {events:?}"
+        );
+        let done_events = formatter.format_done();
+        assert!(
+            done_events.is_empty(),
+            "format_done must not re-emit terminal after Done delta: {done_events:?}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_cost_footer_chunk_dropped() {
+        // opencode.ai appends a malformed {"choices":[],"cost":"0"} footer after
+        // the final chunk. It must produce no deltas so the IR path never
+        // forwards it raw to clients.
+        let mut parser = OpenAIStreamParser::new();
+        let deltas = parser.parse_chunk(&data_sse(
+            r#"{"choices":[],"cost":"0"}"#,
+        ))
+        .unwrap();
+        assert!(
+            deltas.is_empty(),
+            "cost-only chunk with empty choices must be dropped: {deltas:?}"
         );
     }
 }

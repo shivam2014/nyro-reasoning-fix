@@ -84,8 +84,15 @@ impl RequestEncoder for OpenAIEncoder {
             obj.insert("top_p".into(), p.into());
         }
 
-        // Only include tools/tool_choice if the upstream supports tool calling
-        if !suppress_tool_calling && !tools.is_empty() {
+        // Always include `tools` when non-empty. Several models are mis-marked
+        // tool_call:false in the admin store (gpt-5.6-luna-2,
+        // deepseek-v4-flash-2, kimi-*, minimax-m3); gating on that flag silently
+        // drops the tools array upstream and breaks tool calling for them
+        // (evidence: direct upstream prompt_tokens=49 vs via-nyro prompt_tokens=16,
+        // model answered plain text instead of calling the tool). Sending tools
+        // to an upstream that genuinely doesn't support them is harmless — it
+        // ignores the field. Keep the suppress gate only for `tool_choice`.
+        if !tools.is_empty() {
             let tools_val: Vec<Value> = tools
                 .iter()
                 .map(|t| {
@@ -668,5 +675,95 @@ fn tool_message_payload(msg: &Message) -> (String, Option<String>) {
             }
             (msg.content.to_text(), None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::ModelCapabilities;
+    use crate::protocol::ir::request::{MessageContent, Role};
+    use crate::protocol::ir::{AiRequest, Message, ToolChoice, ToolSpec};
+
+    fn capabilities(tool_call: bool) -> ModelCapabilities {
+        ModelCapabilities {
+            provider: "opencode".into(),
+            model_id: "gpt-5.6-luna-2".into(),
+            context_window: 128_000,
+            embedding_length: None,
+            output_max_tokens: Some(8192),
+            tool_call,
+            reasoning: true,
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+            input_cost: None,
+            output_cost: None,
+        }
+    }
+
+    fn req_with_tools(tool_call: bool) -> AiRequest {
+        let mut req = AiRequest::new(
+            "gpt-5.6-luna-2",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        req.tools = Some(vec![ToolSpec {
+            name: "get_weather".into(),
+            description: Some("get weather".into()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}}
+            }),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        }]);
+        req.tool_choice = Some(ToolChoice::Required);
+        req.model_capabilities = Some(capabilities(tool_call));
+        req
+    }
+
+    #[test]
+    fn tools_emitted_even_when_model_capabilities_tool_call_false() {
+        // BUG 1 regression: models mis-marked tool_call:false (gpt-5.6-luna-2,
+        // deepseek-v4-flash-2, kimi-*, minimax-m3) must still get their `tools`
+        // array forwarded upstream, or tool calling silently breaks.
+        let (body, _) = OpenAIEncoder.encode_request(&req_with_tools(false)).unwrap();
+        let tools = body.get("tools").and_then(|v| v.as_array());
+        assert!(
+            tools.is_some(),
+            "tools array must be emitted even when model_capabilities.tool_call=false: {body}"
+        );
+        let tools = tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+    }
+
+    #[test]
+    fn tool_choice_still_suppressed_when_tool_call_false() {
+        // The suppress gate must remain in force for `tool_choice` only.
+        let (body, _) = OpenAIEncoder.encode_request(&req_with_tools(false)).unwrap();
+        assert!(
+            body.get("tool_choice").is_none(),
+            "tool_choice must stay suppressed when model_capabilities.tool_call=false: {body}"
+        );
+    }
+
+    #[test]
+    fn tools_and_tool_choice_emitted_when_tool_call_true() {
+        let (body, _) = OpenAIEncoder.encode_request(&req_with_tools(true)).unwrap();
+        let tools = body.get("tools").and_then(|v| v.as_array());
+        assert!(tools.is_some(), "tools must be emitted when tool_call=true: {body}");
+        assert_eq!(
+            body.get("tool_choice"),
+            Some(&serde_json::json!("required")),
+            "tool_choice must be forwarded when tool_call=true: {body}"
+        );
     }
 }

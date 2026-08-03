@@ -393,6 +393,7 @@ pub struct AnthropicStreamFormatter {
     in_text_block: bool,
     in_tool_block: bool,
     message_started: bool,
+    done_emitted: bool,
 }
 
 impl Default for AnthropicStreamFormatter {
@@ -412,6 +413,7 @@ impl AnthropicStreamFormatter {
             in_text_block: false,
             in_tool_block: false,
             message_started: false,
+            done_emitted: false,
         }
     }
 
@@ -585,6 +587,7 @@ impl StreamResponseEncoder for AnthropicStreamFormatter {
                     }
                 }
                 AiStreamDelta::Done { stop_reason } => {
+                    self.done_emitted = true;
                     self.ensure_message_start(&mut events);
                     self.close_thinking_block_if_open(&mut events);
                     self.close_text_block_if_open(&mut events);
@@ -632,7 +635,35 @@ impl StreamResponseEncoder for AnthropicStreamFormatter {
     }
 
     fn format_done(&mut self) -> Vec<SseEvent> {
-        vec![]
+        // Same bug class as the OpenAI formatter: upstreams (e.g. opencode.ai)
+        // that end the stream without a stop event leave the client at EOF with
+        // no terminal event. Emit a synthetic message_delta + message_stop
+        // unless a Done delta already produced one (guard against
+        // double-emission).
+        if self.done_emitted {
+            return vec![];
+        }
+        self.done_emitted = true;
+        let mut events = Vec::new();
+        self.ensure_message_start(&mut events);
+        self.close_thinking_block_if_open(&mut events);
+        self.close_text_block_if_open(&mut events);
+        self.close_tool_block_if_open(&mut events);
+        let mut usage = serde_json::json!({
+            "output_tokens": self.usage.completion_tokens
+        });
+        extend_usage_json(&mut usage, &self.usage);
+        let msg_delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": usage
+        });
+        events.push(SseEvent::new(Some("message_delta"), msg_delta.to_string()));
+        events.push(SseEvent::new(
+            Some("message_stop"),
+            r#"{"type":"message_stop"}"#,
+        ));
+        events
     }
 
     fn usage(&self) -> Usage {
@@ -1449,6 +1480,60 @@ mod tests {
             formatter.usage().prompt_tokens,
             60,
             "prompt_tokens=60 from message_delta must be captured in formatter state",
+        );
+    }
+
+    // ── BUG 2: terminal event when upstream never emits a stop event ──
+
+    #[test]
+    fn test_format_done_emits_message_stop_when_no_done_delta() {
+        // Upstream ends the stream without message_delta/message_stop.
+        // format_done must synthesize a terminal message_delta + message_stop.
+        let mut formatter = AnthropicStreamFormatter::new();
+        formatter.format_deltas(&[AiStreamDelta::MessageStart {
+            id: "msg_x".to_string(),
+            model: "claude-3-7-sonnet".to_string(),
+        }]);
+        let events = formatter.format_done();
+        let types: Vec<String> = events.iter().filter_map(|e| e.event.clone()).collect();
+        assert!(
+            types.iter().any(|t| t == "message_delta"),
+            "expected message_delta, got: {events:?}"
+        );
+        assert!(
+            types.iter().any(|t| t == "message_stop"),
+            "expected message_stop, got: {events:?}"
+        );
+        let delta_ev = events
+            .iter()
+            .find(|e| e.event.as_deref() == Some("message_delta"))
+            .unwrap();
+        let json: Value = serde_json::from_str(&delta_ev.data).unwrap();
+        assert_eq!(json["delta"]["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn test_format_done_no_double_emission_after_done_delta() {
+        let mut formatter = AnthropicStreamFormatter::new();
+        let events = formatter.format_deltas(&[
+            AiStreamDelta::MessageStart {
+                id: "msg_x".to_string(),
+                model: "claude-3-7-sonnet".to_string(),
+            },
+            AiStreamDelta::Done {
+                stop_reason: "stop".to_string(),
+            },
+        ]);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event.as_deref() == Some("message_stop")),
+            "Done delta must emit message_stop: {events:?}"
+        );
+        let done_events = formatter.format_done();
+        assert!(
+            done_events.is_empty(),
+            "format_done must not re-emit terminal after Done delta: {done_events:?}"
         );
     }
 }

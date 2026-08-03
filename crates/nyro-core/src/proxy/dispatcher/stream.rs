@@ -88,6 +88,12 @@ pub(super) async fn handle_stream(
     // Used when ingress == egress protocol and the vendor declares no response
     // mutations (passthrough_resp=true). Upstream bytes are forwarded verbatim;
     // a side-channel parser accumulates usage stats for logging only.
+    //
+    // Tail handling on this path: frames are split on the SSE blank-line
+    // delimiter and scanned cheaply (no full-stream buffering). Bare cost
+    // footers like opencode.ai's {"choices":[],"cost":"0"} are absorbed, and
+    // if the upstream ends without finish_reason/[DONE] a synthetic terminal
+    // is appended before the channel closes (see passthrough_tail_events).
     if passthrough_resp {
         let (pt_tx, pt_rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
 
@@ -110,6 +116,8 @@ pub(super) async fn handle_stream(
             let mut passthrough_mode = PassthroughBodyMode::Undecided;
             let mut converted_client_sse: Option<String> = None;
             let mut converted_ai_resp = None;
+            let mut sse_frame_buf: Vec<u8> = Vec::new();
+            let mut pt_flags = PassthroughFlags::default();
 
             while let Some(result) = byte_stream.next().await {
                 match result {
@@ -126,7 +134,14 @@ pub(super) async fn handle_stream(
                                     Some(PassthroughBodyMode::RawSse) => {
                                         passthrough_mode = PassthroughBodyMode::RawSse;
                                         let pending = std::mem::take(&mut undecided_buf);
-                                        if pt_tx.send(Ok(Bytes::from(pending))).await.is_err() {
+                                        if !forward_passthrough_bytes(
+                                            Bytes::from(pending),
+                                            &mut sse_frame_buf,
+                                            &mut pt_flags,
+                                            &pt_tx,
+                                        )
+                                        .await
+                                        {
                                             break; // client disconnected
                                         }
                                     }
@@ -138,7 +153,9 @@ pub(super) async fn handle_stream(
                                 }
                             }
                             PassthroughBodyMode::RawSse => {
-                                if pt_tx.send(Ok(b)).await.is_err() {
+                                if !forward_passthrough_bytes(b, &mut sse_frame_buf, &mut pt_flags, &pt_tx)
+                                    .await
+                                {
                                     break; // client disconnected
                                 }
                             }
@@ -158,6 +175,31 @@ pub(super) async fn handle_stream(
                             "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"stream_error\",\"message\":\"{msg}\"}}}}\n\n"
                         );
                         let _ = pt_tx.send(Ok(Bytes::from(err_sse))).await;
+                        break;
+                    }
+                }
+            }
+
+            // Tail handling for the raw-SSE passthrough: flush any partial
+            // trailing frame, then synthesize a terminal finish_reason + [DONE]
+            // when the upstream ended without one (e.g. opencode.ai stops at a
+            // usage-only chunk followed by a bare cost footer). Never double-
+            // emit when a terminal already passed through, and never after a
+            // stream error (the client already got an explicit error event).
+            if matches!(passthrough_mode, PassthroughBodyMode::RawSse) && stream_error.is_none() {
+                if !sse_frame_buf.is_empty() {
+                    let partial = std::mem::take(&mut sse_frame_buf);
+                    pt_flags.observe_frame(&partial);
+                    if !is_cost_footer_frame(&partial) {
+                        let _ = pt_tx.send(Ok(Bytes::from(partial))).await;
+                    }
+                }
+                for ev in passthrough_tail_events(
+                    pt_flags.saw_done,
+                    pt_flags.saw_finish_reason,
+                    pt_flags.saw_tool_call,
+                ) {
+                    if pt_tx.send(Ok(ev)).await.is_err() {
                         break;
                     }
                 }
@@ -277,6 +319,9 @@ pub(super) async fn handle_stream(
                     }
                 }
             }
+            // Malformed upstream chunks with empty choices (e.g. opencode.ai's
+            // {"choices":[],"cost":"0"} footer) yield no deltas from the parser,
+            // so they are dropped here rather than forwarded raw to the client.
         }
 
         if let Ok(ai_deltas) = stream_parser.finish() {
@@ -351,6 +396,154 @@ enum PassthroughBodyMode {
     NonSseJson,
 }
 
+/// Terminal-state flags collected while forwarding raw SSE frames. Only tail
+/// handling consumes them; the forward path stays strictly per-frame (no
+/// full-stream buffering).
+#[derive(Debug, Clone, Copy, Default)]
+struct PassthroughFlags {
+    saw_done: bool,
+    saw_finish_reason: bool,
+    saw_tool_call: bool,
+}
+
+impl PassthroughFlags {
+    /// Scan one complete SSE frame and update the flags. Cheap substring /
+    /// single-frame JSON checks only.
+    fn observe_frame(&mut self, frame: &[u8]) {
+        if frame_is_done(frame) {
+            self.saw_done = true;
+        }
+        if frame_has_finish_reason(frame) {
+            self.saw_finish_reason = true;
+        }
+        if contains_bytes(frame, b"\"tool_calls\"") {
+            self.saw_tool_call = true;
+        }
+    }
+}
+
+/// Feed upstream bytes into the SSE frame buffer, forwarding complete frames
+/// (dropping bare cost-footers) and updating the terminal flags. Returns false
+/// if the client disconnected.
+async fn forward_passthrough_bytes(
+    bytes: Bytes,
+    frame_buf: &mut Vec<u8>,
+    flags: &mut PassthroughFlags,
+    pt_tx: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+) -> bool {
+    frame_buf.extend_from_slice(&bytes);
+    let mut start = 0;
+    while let Some(end) = find_sse_frame_end(&frame_buf[start..]).map(|rel| start + rel) {
+        let frame = &frame_buf[start..end];
+        flags.observe_frame(frame);
+        if !is_cost_footer_frame(frame) {
+            if pt_tx.send(Ok(Bytes::from(frame.to_vec()))).await.is_err() {
+                return false;
+            }
+        }
+        start = end;
+    }
+    if start > 0 {
+        frame_buf.drain(..start);
+    }
+    true
+}
+
+/// Find the byte offset just past the next complete SSE frame delimiter
+/// (`\n\n` or `\r\n\r\n`) in `buf`, or None if no complete frame is present.
+fn find_sse_frame_end(buf: &[u8]) -> Option<usize> {
+    let lf = find_subslice(buf, b"\n\n").map(|p| p + 2);
+    let crlf = find_subslice(buf, b"\r\n\r\n").map(|p| p + 4);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    find_subslice(haystack, needle).is_some()
+}
+
+/// Extract the payload of the first `data:` line of an SSE frame.
+fn sse_frame_data(frame: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(frame).ok()?;
+    let line = text.lines().find(|l| l.trim_start().starts_with("data:"))?;
+    Some(line.trim_start().strip_prefix("data:")?.trim_start())
+}
+
+/// True when the frame is the standard `data: [DONE]` terminator.
+fn frame_is_done(frame: &[u8]) -> bool {
+    sse_frame_data(frame).map_or(false, |d| d.trim() == "[DONE]")
+}
+
+/// True when the frame's JSON payload carries a non-null finish_reason.
+/// `"finish_reason":null` (sent mid-stream) does not count.
+fn frame_has_finish_reason(frame: &[u8]) -> bool {
+    let Some(data) = sse_frame_data(frame) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+    !v["choices"][0]["finish_reason"].is_null()
+}
+
+/// True when the frame is a bare cost footer like opencode.ai's
+/// `{"choices":[],"cost":"0"}` — empty choices array plus a cost key, no
+/// content, no finish_reason. Matched loosely (empty choices + cost key
+/// present) so these malformed frames never reach the client raw.
+fn is_cost_footer_frame(frame: &[u8]) -> bool {
+    let Some(data) = sse_frame_data(frame) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+    v.get("cost").is_some()
+        && v.get("choices")
+            .and_then(|c| c.as_array())
+            .is_some_and(|a| a.is_empty())
+}
+
+/// Synthetic terminal SSE frames for the byte-passthrough path, used when the
+/// upstream ended without emitting a finish_reason or [DONE] (e.g. opencode.ai
+/// streams stop at a usage-only chunk followed by a bare cost footer). Emits
+/// nothing when a terminal already passed through upstream (no double-emission).
+fn passthrough_tail_events(
+    saw_done: bool,
+    saw_finish_reason: bool,
+    saw_tool_call: bool,
+) -> Vec<Bytes> {
+    if saw_done || saw_finish_reason {
+        return vec![];
+    }
+    let finish_reason = if saw_tool_call { "tool_calls" } else { "stop" };
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let chunk = serde_json::json!({
+        "id": "",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": "",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+    });
+    vec![
+        Bytes::from(format!("data: {chunk}\n\n")),
+        Bytes::from("data: [DONE]\n\n"),
+    ]
+}
+
 fn classify_passthrough_body(bytes: &[u8]) -> Option<PassthroughBodyMode> {
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
@@ -400,6 +593,85 @@ fn format_non_sse_stream_response(
 mod tests {
     use super::*;
     use crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+
+    // ── BUG 3: passthrough terminal injection ──
+
+    #[test]
+    fn passthrough_tail_injects_terminal_when_nothing_seen() {
+        let events = passthrough_tail_events(false, false, false);
+        assert_eq!(events.len(), 2, "finish_reason chunk + [DONE] expected");
+        let frame = std::str::from_utf8(&events[0]).unwrap();
+        let payload = frame.trim_start().strip_prefix("data: ").unwrap().trim();
+        let v: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
+        assert_eq!(v["choices"][0]["delta"], serde_json::json!({}));
+        assert_eq!(
+            std::str::from_utf8(&events[1]).unwrap(),
+            "data: [DONE]\n\n"
+        );
+    }
+
+    #[test]
+    fn passthrough_tail_uses_tool_calls_reason_when_seen() {
+        let events = passthrough_tail_events(false, false, true);
+        let payload = std::str::from_utf8(&events[0])
+            .unwrap()
+            .trim_start()
+            .strip_prefix("data: ")
+            .unwrap()
+            .trim();
+        let v: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn passthrough_tail_suppressed_when_terminal_already_seen() {
+        assert!(passthrough_tail_events(true, false, false).is_empty());
+        assert!(passthrough_tail_events(false, true, false).is_empty());
+        assert!(passthrough_tail_events(true, true, true).is_empty());
+    }
+
+    #[test]
+    fn cost_footer_frame_is_detected_loosely() {
+        assert!(is_cost_footer_frame(b"data: {\"choices\":[],\"cost\":\"0\"}\n\n"));
+        // usage-only chunk with id/usage but no cost key must NOT be dropped
+        assert!(!is_cost_footer_frame(
+            b"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":49}}\n\n"
+        ));
+        // real content chunk must NOT be dropped
+        assert!(!is_cost_footer_frame(
+            b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        ));
+    }
+
+    #[test]
+    fn passthrough_flags_observed_from_frames() {
+        let mut flags = PassthroughFlags::default();
+        flags.observe_frame(b"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        assert!(!flags.saw_done && !flags.saw_finish_reason && !flags.saw_tool_call);
+        // tool_calls with null finish_reason: tool_call flag set, finish NOT
+        flags.observe_frame(
+            b"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"c1\"}]},\"finish_reason\":null}]}\n\n",
+        );
+        assert!(flags.saw_tool_call);
+        assert!(!flags.saw_finish_reason);
+        flags.observe_frame(b"data: [DONE]\n\n");
+        assert!(flags.saw_done);
+
+        let mut done_flags = PassthroughFlags::default();
+        done_flags.observe_frame(
+            b"data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        assert!(done_flags.saw_finish_reason);
+    }
+
+    #[test]
+    fn find_sse_frame_end_handles_lf_and_crlf() {
+        assert_eq!(find_sse_frame_end(b"data: a\n\n"), Some(9));
+        assert_eq!(find_sse_frame_end(b"data: a\r\n\r\n"), Some(11));
+        assert_eq!(find_sse_frame_end(b"data: a\n\ndata: b\r\n\r\n"), Some(9));
+        assert_eq!(find_sse_frame_end(b"data: partial"), None);
+    }
 
     #[test]
     fn non_sse_gemini_stream_response_is_formatted_as_sse() {
