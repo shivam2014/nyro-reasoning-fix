@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="120" src="docs/images/NYRO-logo.png">
+  <img width="120" src="docs/images/NYRO-logo.webp" alt="Nyro logo">
 </p>
 
 <h2 align="center">Nyro AI Gateway</h2>
@@ -18,7 +18,7 @@
 ---
 
 <p align="center">
-  <img src="docs/images/NYRO-ui-home-en.png" width="800">
+  <img src="docs/images/NYRO-ui-home-en.webp" alt="Nyro dashboard: request volume, latency, top models and provider overview" width="800">
 </p>
 
 ---
@@ -61,12 +61,12 @@ Nyro ships as a **desktop app** (macOS / Windows / Linux) and a **standalone ser
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-providers-add-en.png" height="260"><br><sub>Provider Management</sub></td>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-routes-en.png" height="260"><br><sub>Route Configuration</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-providers-add-en.webp" alt="Provider management: adding a provider and choosing its protocol" height="260"><br><sub>Provider Management</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-routes-en.webp" alt="Route configuration mapping model names to providers" height="260"><br><sub>Route Configuration</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-apikeys-en.png" height="260"><br><sub>API Key Management</sub></td>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-connect-en.png" height="260"><br><sub>Connect — Code & CLI Integration</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-apikeys-en.webp" alt="API key management for downstream clients" height="260"><br><sub>API Key Management</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-connect-en.webp" alt="Connect page with code and CLI integration snippets" height="260"><br><sub>Connect — Code & CLI Integration</sub></td>
   </tr>
 </table>
 

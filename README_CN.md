@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="120" src="docs/images/NYRO-logo.png">
+  <img width="120" src="docs/images/NYRO-logo.webp" alt="Nyro 标志">
 </p>
 
 <h2 align="center">Nyro AI Gateway</h2>
@@ -18,7 +18,7 @@
 ---
 
 <p align="center">
-  <img src="docs/images/NYRO-ui-home-cn.png" width="800">
+  <img src="docs/images/NYRO-ui-home-cn.webp" alt="Nyro 仪表盘：请求量、延迟、热门模型与 Provider 概览" width="800">
 </p>
 
 ---
@@ -61,12 +61,12 @@ Nyro 同时提供 **桌面应用**（macOS / Windows / Linux）和 **独立服�
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-providers-add-cn.png" height="260"><br><sub>Provider 管理</sub></td>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-routes-cn.png" height="260"><br><sub>路由配置</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-providers-add-cn.webp" alt="Provider 管理：添加 Provider 并选择协议" height="260"><br><sub>Provider 管理</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-routes-cn.webp" alt="路由配置：将模型名称映射到 Provider" height="260"><br><sub>路由配置</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-apikeys-cn.png" height="260"><br><sub>API Key 管理</sub></td>
-    <td align="center" width="50%"><img src="docs/images/NYRO-ui-connect-cn.png" height="260"><br><sub>Connect：代码与 CLI 集成</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-apikeys-cn.webp" alt="下游客户端的 API Key 管理" height="260"><br><sub>API Key 管理</sub></td>
+    <td align="center" width="50%"><img src="docs/images/NYRO-ui-connect-cn.webp" alt="Connect 页面：代码与 CLI 集成示例" height="260"><br><sub>Connect：代码与 CLI 集成</sub></td>
   </tr>
 </table>
 
